@@ -2,7 +2,7 @@
 # ==============================================================================
 # Script: nai-install.sh
 # Purpose: Deploys Nutanix Enterprise AI (Production-Hardened)
-# Architecture: Ultra-Resilient Air-Gap + Split-Brain CSI Fix & Smart Caching
+# Architecture: Air-Gap + Split-Brain CSI + Smart Caching + RawDeployment Fix
 # ==============================================================================
 
 set -euo pipefail
@@ -118,18 +118,15 @@ if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
     MGMT_MODE=$(gum choose "Managed by an existing NKP Management Cluster" "Self-Managed (Standalone)")
 fi
 
+# SMART CACHE: Read existing file
 if [ -f ".nai_cache.env" ]; then source .nai_cache.env; fi
 
-# SMART CACHE: Backwards compatibility for the old FILE_SERVER_NAME variable
-if [ -n "${FILE_SERVER_NAME:-}" ]; then
-    FILE_SERVER_SHORT_NAME="${FILE_SERVER_SHORT_NAME:-$FILE_SERVER_NAME}"
-    FILE_SERVER_FQDN_OR_IP="${FILE_SERVER_FQDN_OR_IP:-$FILE_SERVER_NAME}"
-fi
+# SMART CACHE: Bulletproof fallback logic for split variables
+FILE_SERVER_SHORT_NAME="${FILE_SERVER_SHORT_NAME:-${FILE_SERVER_NAME:-}}"
+FILE_SERVER_FQDN_OR_IP="${FILE_SERVER_FQDN_OR_IP:-${FILE_SERVER_NAME:-}}"
 
 PC_ENDPOINT="${PC_ENDPOINT:-}"
 NUTANIX_USER="${NUTANIX_USER:-admin}"
-FILE_SERVER_SHORT_NAME="${FILE_SERVER_SHORT_NAME:-}"
-FILE_SERVER_FQDN_OR_IP="${FILE_SERVER_FQDN_OR_IP:-}"
 FILES_REST_USER="${FILES_REST_USER:-files-fs2}"
 PE_CLUSTER="${PE_CLUSTER:-}"
 SUBNET="${SUBNET:-}"
@@ -212,7 +209,7 @@ fi
 
 TARGET_NAMESPACE=$(gum input --prompt "Target K8s Namespace for NAI: " --value "${TARGET_NAMESPACE:-nai-system}")
 
-# SMART CACHE: Write out the new variables so they are remembered perfectly next time
+# SMART CACHE: Write out the explicit new variables cleanly
 {
     echo "export REGISTRY_URL=\"${REGISTRY_URL}\""
     echo "export REGISTRY_USER=\"${REGISTRY_USER}\""
@@ -324,12 +321,12 @@ kubectl delete gatewayclass traefik 2>/dev/null || true
 
 kubectl create namespace "${TARGET_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
 
-# PRODUCTION FIX: Secret uses IP/FQDN to guarantee reliable network routing
+# PRODUCTION FIX: Secret uses IP/FQDN (with explicit port 9440) to guarantee reliable network routing
 gum style --foreground 212 "🔐 Safely storing storage secrets using strict literal blocks..."
 kubectl delete secret ntnx-secret -n "${TARGET_NAMESPACE}" 2>/dev/null || true
 kubectl create secret generic ntnx-secret -n "${TARGET_NAMESPACE}" \
   --from-literal=key="${PC_ENDPOINT}:9440:${NUTANIX_USER}:${NUTANIX_PASSWORD}" \
-  --from-literal=files-key="${FILE_SERVER_FQDN_OR_IP}:${FILES_REST_USER}:${FILES_REST_PASSWORD}"
+  --from-literal=files-key="${FILE_SERVER_FQDN_OR_IP}:9440:${FILES_REST_USER}:${FILES_REST_PASSWORD}"
 
 # PRODUCTION FIX: StorageClass uses exact Short Name to satisfy Prism API UUID mapping
 cat <<EOF | kubectl apply -f - > /dev/null
@@ -372,7 +369,17 @@ for dep in "${DEPS[@]}"; do
     release_name="${dep%%:*}"
     chart_dir=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "${dep##*:}" | head -n 1)
     if [ -n "$chart_dir" ]; then
-        helm upgrade --install "$release_name" "$chart_dir" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1 || true
+        if [ "$release_name" == "kserve" ]; then
+            # PRODUCTION FIX: Inject RawDeployment to prevent UI ServerlessModeRejected errors
+            helm upgrade --install "$release_name" "$chart_dir" \
+                --namespace "${TARGET_NAMESPACE}" \
+                --wait --insecure-skip-tls-verify \
+                --set "kserve.controller.deploymentMode=RawDeployment" >/dev/null 2>&1 || true
+        else
+            helm upgrade --install "$release_name" "$chart_dir" \
+                --namespace "${TARGET_NAMESPACE}" \
+                --wait --insecure-skip-tls-verify >/dev/null 2>&1 || true
+        fi
     fi
 done
 
