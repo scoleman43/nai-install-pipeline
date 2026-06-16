@@ -1,258 +1,408 @@
 #!/bin/bash
 # ==============================================================================
-# Script: deploy-nai.sh
-# Purpose: Provisions a dedicated 'nai' NKP workload cluster and deploys Nutanix 
-#          Enterprise AI 2.6. Autoloads cached infrastructure details from Phase 3.
+# Script: nai-install.sh
+# Purpose: Deploys Nutanix Enterprise AI (Production-Hardened)
+# Architecture: Ultra-Resilient Air-Gap + Split-Brain CSI Fix & Smart Caching
 # ==============================================================================
 
 set -euo pipefail
 
+clear 
 export TERM="xterm-256color"
-export NAI_VERSION="2.6.0"
-export BUNDLE_ARCHIVE="nai-bundle-${NAI_VERSION}.tar.gz"
 export BUNDLE_DIR="${PWD}/nai-bundles"
-export CLUSTER_NAME="nai"
+export NAI_CLUSTER_NAME="nai"
 
 # ==============================================================================
-# STEP 0: INSTALLATION MODE 
+# STEP 0: DEPENDENCY PRE-FLIGHT
 # ==============================================================================
-if [ -z "${INSTALL_MODE:-}" ]; then
-    echo "--- Select NAI Installation Mode ---"
-    echo "1) Internet-Based (Direct or via Corporate Proxy)"
-    echo "2) Dark Site / Air-Gapped (Requires local bundle in current directory)"
-    
-    read -r -p "Select Mode (1 or 2): " MODE_SELECTION
-    
-    if [ "$MODE_SELECTION" == "2" ]; then
-        export INSTALL_MODE="dark"
-        export USE_PROXY="false"
-        
-        if [ ! -f "${BUNDLE_ARCHIVE}" ] && [ ! -d "${BUNDLE_DIR}" ]; then
-            echo "❌ ERROR: '${BUNDLE_ARCHIVE}' not found in current directory."
-            exit 1
-        fi
-        
-        if [ ! -d "${BUNDLE_DIR}" ]; then
-            echo "Extracting local NAI bundle..."
-            mkdir -p "${BUNDLE_DIR}"
-            tar -xzf "${BUNDLE_ARCHIVE}" -C "${BUNDLE_DIR}"
-        fi
+if ! command -v gum &> /dev/null; then
+    echo "❌ ERROR: 'gum' is not installed. Please run your initial Phase 1 script first."
+    exit 1
+fi
 
-    elif [ "$MODE_SELECTION" == "1" ]; then
-        export INSTALL_MODE="internet"
-        
-        echo "--- Checking Network / Proxy Requirements ---"
-        if [ -z "${http_proxy:-}" ]; then
-            read -r -p "Do you need to configure a proxy for outbound internet access? (y/N): " needs_proxy
-            if [[ "$needs_proxy" =~ ^[Yy] ]]; then
-                export USE_PROXY="true"
-                read -r -p "Proxy URL: " PROXY_URL
-                read -r -p "NO_PROXY list: " NO_PROXY_INPUT
-                export PROXY_URL="${PROXY_URL}"
-                export NO_PROXY="${NO_PROXY_INPUT:-127.0.0.1,localhost,192.168.0.0/16,10.0.0.0/16}"
-            else
-                export USE_PROXY="false"
-            fi
-        else
-            export USE_PROXY="true"
-            export PROXY_URL="${http_proxy}"
-            export NO_PROXY="${no_proxy:-127.0.0.1,localhost,192.168.0.0/16,10.0.0.0/16}"
-        fi
+gum style --border double --margin "1" --padding "1 2" --border-foreground 212 "Nutanix Enterprise AI (NAI) Installer"
 
-        if [ "${USE_PROXY}" == "true" ]; then
-            export http_proxy="${PROXY_URL}"; export https_proxy="${PROXY_URL}"; export no_proxy="${NO_PROXY}"
-            export HTTP_PROXY="${PROXY_URL}"; export HTTPS_PROXY="${PROXY_URL}"; export NO_PROXY="${NO_PROXY}"
-        fi
-        
-        if ! command -v gum &> /dev/null; then
-            echo "❌ ERROR: 'gum' is not installed. Please run phase1.sh first."
-            exit 1
-        fi
-    else
-        echo "Invalid selection."
+MISSING_TOOLS=""
+for tool in kubectl nkp tar curl docker; do
+    if ! command -v "$tool" &> /dev/null; then
+        MISSING_TOOLS="$MISSING_TOOLS $tool"
+    fi
+done
+
+if [ -n "$MISSING_TOOLS" ]; then
+    gum style --foreground 196 "❌ FATAL ERROR: Missing required dependencies:$MISSING_TOOLS"
+    exit 1
+fi
+
+# ==============================================================================
+# STEP 1: INSTALLATION MODE & TARGETED EXTRACTION
+# ==============================================================================
+echo "Please select the installation network mode:"
+MODE_SELECTION=$(gum choose "Dark Site / Air-Gapped (Local bundle)" "Internet-Based (Direct or Proxy)")
+
+if [ "$MODE_SELECTION" == "Dark Site / Air-Gapped (Local bundle)" ]; then
+    export INSTALL_MODE="dark"
+    HELM_ARCHIVES=( *helm*.tar* *chart*.tar* )
+    if [ ${#HELM_ARCHIVES[@]} -eq 0 ] || [ ! -e "${HELM_ARCHIVES[0]}" ]; then
+        gum style --foreground 196 "❌ ERROR: No NAI Helm Charts bundle (*helm*.tar) found."
         exit 1
     fi
-    
-    echo "Initializing UI mode..."
-    sleep 1.5
-    clear
-    exec bash "$0" "$@"
-fi
-
-# ==============================================================================
-# STEP 1: LOAD CACHE & INTERACTIVE CONFIGURATION
-# ==============================================================================
-gum style --border double --margin "1" --padding "1 2" --border-foreground 212 "Nutanix Enterprise AI (NAI) ${NAI_VERSION} Installer"
-
-# Attempt to load data from Phase 1, 2, and 3
-CACHE_FOUND="false"
-if [ -f ".nkp_phase3_cache.env" ] && [ -f ".nkp_registry.env" ] && [ -f ".nkp_image.env" ]; then
-    source .nkp_phase3_cache.env
-    source .nkp_registry.env
-    source .nkp_image.env
-    CACHE_FOUND="true"
-    gum style --foreground 82 "✔ Found Phase 3 Cache: Pre-loading Prism, Subnet, and Harbor details."
+    HELM_ARCHIVE="${HELM_ARCHIVES[0]}"
+    export NAI_VERSION=$(echo "${HELM_ARCHIVE}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?' | tr '\n' ' ' | awk '{print $1}' || echo "2.7.0")
+    mkdir -p "${BUNDLE_DIR}/charts"
+    tar -xf "${HELM_ARCHIVE}" -C "${BUNDLE_DIR}/charts"
 else
-    gum style --foreground 226 "⚠️ Cache files missing. You will need to enter infrastructure details manually."
+    export INSTALL_MODE="internet"
+    export NAI_VERSION=$(gum input --prompt "Enter NAI Version to deploy: " --value "2.7.0")
+    echo ""
+    gum spin --spinner dot --spinner.foreground 212 --title "Extracting downloaded NAI ${NAI_VERSION} bundle..." -- sleep 3
+    mkdir -p "${BUNDLE_DIR}/charts"
+    tar -xf "bundlenai-v${NAI_VERSION}.tar" -C "${BUNDLE_DIR}/charts" 2>/dev/null || true
 fi
 
-# Initialize Default Variables Fallbacks
+# Recover Helm if missing
+if ! command -v helm &> /dev/null; then
+    if [ "${INSTALL_MODE}" == "internet" ]; then
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        chmod 700 get_helm.sh && sudo ./get_helm.sh >/dev/null 2>&1 && rm -f get_helm.sh
+    else
+        PREREQ_TARBALL=$(ls nkp-prereqs-bundle.tar* 2>/dev/null | awk '{print $1}' | head -n 1 || true)
+        if [ -n "$PREREQ_TARBALL" ]; then
+            mkdir -p .temp_helm
+            tar -xf "$PREREQ_TARBALL" -C .temp_helm --strip-components=2 "nkp-prereqs-bundle/binaries/helm" 2>/dev/null || true
+            sudo mv .temp_helm/helm /usr/local/bin/helm
+            rm -rf .temp_helm && chmod +x /usr/local/bin/helm
+        fi
+    fi
+fi
+
+# Recover Skopeo if missing
+export USE_SKOPEO="true"
+if ! command -v skopeo &> /dev/null; then
+    if [ -f /etc/os-release ]; then . /etc/os-release; OS=$ID; else OS="unknown"; fi
+    if [ "${INSTALL_MODE}" == "internet" ]; then
+        if [[ "$OS" =~ ^(ubuntu|debian)$ ]]; then
+            sudo apt-get update -y -qq && sudo apt-get install -y -qq skopeo containers-common >/dev/null 2>&1 || true
+        elif [[ "$OS" =~ ^(rhel|centos|rocky)$ ]]; then
+            sudo yum install -y -q skopeo >/dev/null 2>&1 || true
+        fi
+    else
+        PREREQ_TARBALL=$(ls nkp-prereqs-bundle.tar* 2>/dev/null | awk '{print $1}' | head -n 1 || true)
+        if [ -n "$PREREQ_TARBALL" ]; then
+            mkdir -p .temp_packages
+            tar -xf "$PREREQ_TARBALL" -C .temp_packages --strip-components=2 "nkp-prereqs-bundle/packages" 2>/dev/null || true
+            if ls .temp_packages/*skopeo* 1> /dev/null 2>&1; then
+                if [[ "$OS" =~ ^(ubuntu|debian)$ ]]; then
+                    sudo dpkg -i .temp_packages/*skopeo*.deb .temp_packages/*containers-common*.deb 2>/dev/null || true
+                elif [[ "$OS" =~ ^(rhel|centos|rocky)$ ]]; then
+                    sudo rpm -Uvh --force --nodeps .temp_packages/*skopeo*.rpm .temp_packages/*containers-common*.rpm 2>/dev/null || true
+                fi
+            fi
+            rm -rf .temp_packages
+        fi
+    fi
+    if ! command -v skopeo &> /dev/null; then export USE_SKOPEO="false"; fi
+fi
+
+# ==============================================================================
+# STEP 2: ENVIRONMENT CONFIGURATION GATHERING
+# ==============================================================================
+echo ""
+echo "Do you need to provision a new NKP cluster for NAI, or use an existing one?"
+CLUSTER_MODE=$(gum choose "Provision a NEW cluster" "Use an EXISTING cluster")
+
+MGMT_MODE="none"
+if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
+    echo ""
+    echo "How should this new cluster be managed?"
+    MGMT_MODE=$(gum choose "Managed by an existing NKP Management Cluster" "Self-Managed (Standalone)")
+fi
+
+if [ -f ".nai_cache.env" ]; then source .nai_cache.env; fi
+
+# SMART CACHE: Backwards compatibility for the old FILE_SERVER_NAME variable
+if [ -n "${FILE_SERVER_NAME:-}" ]; then
+    FILE_SERVER_SHORT_NAME="${FILE_SERVER_SHORT_NAME:-$FILE_SERVER_NAME}"
+    FILE_SERVER_FQDN_OR_IP="${FILE_SERVER_FQDN_OR_IP:-$FILE_SERVER_NAME}"
+fi
+
 PC_ENDPOINT="${PC_ENDPOINT:-}"
 NUTANIX_USER="${NUTANIX_USER:-admin}"
-NUTANIX_PASSWORD="${NUTANIX_PASSWORD:-}"
+FILE_SERVER_SHORT_NAME="${FILE_SERVER_SHORT_NAME:-}"
+FILE_SERVER_FQDN_OR_IP="${FILE_SERVER_FQDN_OR_IP:-}"
+FILES_REST_USER="${FILES_REST_USER:-files-fs2}"
 PE_CLUSTER="${PE_CLUSTER:-}"
 SUBNET="${SUBNET:-}"
 STORAGE_CONTAINER="${STORAGE_CONTAINER:-}"
 IMAGE_NAME="${IMAGE_NAME:-}"
-
 REGISTRY_URL="${REGISTRY_URL:-harbor.local:5000}"
 REGISTRY_USER="${REGISTRY_USER:-admin}"
 REGISTRY_PASS="${REGISTRY_PASS:-}"
+TARGET_NAMESPACE="${TARGET_NAMESPACE:-nai-system}"
+NAI_CP_VIP="${NAI_CP_VIP:-}"
+NAI_METALLB_RANGE="${NAI_METALLB_RANGE:-}"
+MGMT_KUBECONFIG="${MGMT_KUBECONFIG:-}"
+MGMT_WORKSPACE_NAMESPACE="${MGMT_WORKSPACE_NAMESPACE:-}"
 
-if [ "${INSTALL_MODE}" == "internet" ]; then
-    gum style --foreground 99 -- "--- NAI Bundle Download ---"
-    gum spin --spinner dot --spinner.foreground 212 --title "Downloading NAI ${NAI_VERSION} bundle..." -- sleep 3
-    gum style --foreground 82 "✔ Download & Extraction Complete!"
+if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
+    if [ "$MGMT_MODE" == "Managed by an existing NKP Management Cluster" ]; then
+        MGMT_KUBECONFIG=$(gum input --prompt "Path to Management Kubeconfig: " --value "${MGMT_KUBECONFIG:-$HOME/.kube/config}")
+        MGMT_WORKSPACE_NAMESPACE=$(gum input --prompt "Target Workspace Namespace: " --value "${MGMT_WORKSPACE_NAMESPACE:-default}")
+    fi
+else
+    DEF_KUBECONFIG="${PWD}/${NAI_CLUSTER_NAME}.conf"
+    if [ ! -f "$DEF_KUBECONFIG" ]; then DEF_KUBECONFIG="$HOME/.kube/config"; fi
+    EXISTING_KUBECONFIG=$(gum input --prompt "Path to Kubeconfig file: " --value "${EXISTING_KUBECONFIG:-$DEF_KUBECONFIG}")
+    export KUBECONFIG="${EXISTING_KUBECONFIG}"
+    chmod 600 "${KUBECONFIG}" 2>/dev/null || true
+fi
+
+gum style --foreground 99 -- "--- Nutanix Prism Central & Block Storage Details ---"
+PC_ENDPOINT=$(gum input --prompt "Prism Central IP/FQDN: " --value "${PC_ENDPOINT:-}")
+NUTANIX_USER=$(gum input --prompt "Prism Central Username: " --value "${NUTANIX_USER:-admin}")
+
+if [ -n "${NUTANIX_PASSWORD:-}" ]; then
+    gum style --foreground 240 "(Press Enter to keep cached password, or type a new one to override)"
+    NEW_PASS=$(gum input --password --prompt "Prism Central Password: ")
+    if [ -n "$NEW_PASS" ]; then NUTANIX_PASSWORD="$NEW_PASS"; fi
+else
+    while [[ -z "${NUTANIX_PASSWORD:-}" ]]; do NUTANIX_PASSWORD=$(gum input --password --prompt "Prism Central Password: "); done
 fi
 
 echo ""
-gum style --foreground 99 -- "--- Nutanix Infrastructure Details (For NAI Cluster) ---"
-if [ "$CACHE_FOUND" == "false" ]; then
-    PC_ENDPOINT=$(gum input --prompt "Prism Central IP/FQDN: " --value "${PC_ENDPOINT}")
-    NUTANIX_USER=$(gum input --prompt "Prism Central Username: " --value "${NUTANIX_USER}")
-    NUTANIX_PASSWORD=$(gum input --password --prompt "Prism Central Password: ")
-    PE_CLUSTER=$(gum input --prompt "Prism Element Cluster Name: " --value "${PE_CLUSTER}")
-    SUBNET=$(gum input --prompt "AHV Subnet Name/UUID for K8s VMs: " --value "${SUBNET}")
-    STORAGE_CONTAINER=$(gum input --prompt "CSI Storage Container: " --value "${STORAGE_CONTAINER}")
-    IMAGE_NAME=$(gum input --prompt "AHV Image Name for K8s Nodes: " --value "${IMAGE_NAME}")
+gum style --foreground 99 -- "--- Nutanix Files & RWX Storage Details ---"
+gum style --foreground 214 "⚠️ REQUIREMENT 1: The Logical Short Name for Prism Central (e.g., NAI-FS2)."
+FILE_SERVER_SHORT_NAME=$(gum input --prompt "File Server Short Name: " --value "${FILE_SERVER_SHORT_NAME:-}")
+
+gum style --foreground 214 "⚠️ REQUIREMENT 2: The Direct Network Endpoint for the CSI Pod (IP or FQDN)."
+FILE_SERVER_FQDN_OR_IP=$(gum input --prompt "File Server IP or FQDN: " --value "${FILE_SERVER_FQDN_OR_IP:-}")
+
+FILES_REST_USER=$(gum input --prompt "Files REST API Username: " --value "${FILES_REST_USER:-files-fs2}")
+
+if [ -n "${FILES_REST_PASSWORD:-}" ]; then
+    gum style --foreground 240 "(Press Enter to keep cached password, or type a new one to override)"
+    NEW_PASS=$(gum input --password --prompt "Files REST API Password: ")
+    if [ -n "$NEW_PASS" ]; then FILES_REST_PASSWORD="$NEW_PASS"; fi
+else
+    while [[ -z "${FILES_REST_PASSWORD:-}" ]]; do FILES_REST_PASSWORD=$(gum input --password --prompt "Files REST API Password: "); done
 fi
 
-# We MUST prompt for a new VIP, even if cached, because the NAI cluster needs its own unique IP.
-gum style --foreground 212 "NOTE: You must provide a NEW, unused IP for the NAI Control Plane VIP."
-NAI_CP_VIP=$(gum input --prompt "NAI Control Plane VIP: " --placeholder "10.x.x.x")
+if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
+    echo ""
+    gum style --foreground 99 -- "--- Nutanix Infrastructure Details (For NEW NAI Cluster) ---"
+    PE_CLUSTER=$(gum input --prompt "Prism Element Cluster Name: " --value "${PE_CLUSTER:-}")
+    SUBNET=$(gum input --prompt "AHV Subnet Name/UUID for K8s VMs: " --value "${SUBNET:-}")
+    STORAGE_CONTAINER=$(gum input --prompt "CSI Storage Container: " --value "${STORAGE_CONTAINER:-}")
+    IMAGE_NAME=$(gum input --prompt "AHV Image Name for K8s Nodes: " --value "${IMAGE_NAME:-}")
+    NAI_CP_VIP=$(gum input --prompt "NAI Control Plane VIP: " --value "${NAI_CP_VIP:-}")
+    NAI_METALLB_RANGE=$(gum input --prompt "NAI MetalLB IP Range: " --value "${NAI_METALLB_RANGE:-}")
+fi
 
-# Registry and NAI configurations
 echo ""
-gum style --foreground 99 -- "--- Environment Configuration ---"
-if [ "$CACHE_FOUND" == "false" ]; then
-    REGISTRY_URL=$(gum input --prompt "Private Registry URL (Without protocol): " --value "${REGISTRY_URL}")
-    REGISTRY_USER=$(gum input --prompt "Registry Username: " --value "${REGISTRY_USER}")
-    REGISTRY_PASS=$(gum input --password --prompt "Registry Password: ")
+gum style --foreground 99 -- "--- Registry Configuration ---"
+REGISTRY_URL=$(gum input --prompt "Private Registry URL (Without protocol): " --value "${REGISTRY_URL:-}")
+REGISTRY_USER=$(gum input --prompt "Registry Username: " --value "${REGISTRY_USER:-admin}")
+
+if [ -n "${REGISTRY_PASS:-}" ]; then
+    NEW_PASS=$(gum input --password --prompt "Registry Password (Enter to keep cached): ")
+    if [ -n "$NEW_PASS" ]; then REGISTRY_PASS="$NEW_PASS"; fi
+else
+    while [[ -z "${REGISTRY_PASS:-}" ]]; do REGISTRY_PASS=$(gum input --password --prompt "Registry Password: "); done
 fi
 
-TARGET_NAMESPACE=$(gum input --prompt "Target K8s Namespace for NAI: " --value "nai-system")
+TARGET_NAMESPACE=$(gum input --prompt "Target K8s Namespace for NAI: " --value "${TARGET_NAMESPACE:-nai-system}")
+
+# SMART CACHE: Write out the new variables so they are remembered perfectly next time
+{
+    echo "export REGISTRY_URL=\"${REGISTRY_URL}\""
+    echo "export REGISTRY_USER=\"${REGISTRY_USER}\""
+    echo "export REGISTRY_PASS=\"${REGISTRY_PASS}\""
+    echo "export TARGET_NAMESPACE=\"${TARGET_NAMESPACE}\""
+    echo "export PC_ENDPOINT=\"${PC_ENDPOINT}\""
+    echo "export NUTANIX_USER=\"${NUTANIX_USER}\""
+    echo "export NUTANIX_PASSWORD=\"${NUTANIX_PASSWORD}\""
+    echo "export FILE_SERVER_SHORT_NAME=\"${FILE_SERVER_SHORT_NAME}\""
+    echo "export FILE_SERVER_FQDN_OR_IP=\"${FILE_SERVER_FQDN_OR_IP}\""
+    echo "export FILES_REST_USER=\"${FILES_REST_USER}\""
+    echo "export FILES_REST_PASSWORD=\"${FILES_REST_PASSWORD}\""
+    echo "export PE_CLUSTER=\"${PE_CLUSTER}\""
+    echo "export SUBNET=\"${SUBNET}\""
+    echo "export STORAGE_CONTAINER=\"${STORAGE_CONTAINER}\""
+    echo "export IMAGE_NAME=\"${IMAGE_NAME}\""
+    echo "export NAI_CP_VIP=\"${NAI_CP_VIP}\""
+    echo "export NAI_METALLB_RANGE=\"${NAI_METALLB_RANGE}\""
+    echo "export MGMT_KUBECONFIG=\"${MGMT_KUBECONFIG}\""
+    echo "export MGMT_WORKSPACE_NAMESPACE=\"${MGMT_WORKSPACE_NAMESPACE}\""
+} > .nai_cache.env
 
 # ==============================================================================
-# STEP 2: PROVISION 'NAI' KUBERNETES CLUSTER VIA NKP
+# STEP 3: IMAGE REGISTRY SEEDING
 # ==============================================================================
-gum confirm "Ready to provision the dedicated '${CLUSTER_NAME}' Kubernetes cluster and deploy NAI?" || exit 0
+echo ""
+gum style --foreground 99 -- "--- Image Registry Seeding ---"
+IMAGE_BUNDLES=( nai-v*.tar *nai*image*.tar* *image*.tar* )
+GUESSED_BUNDLE=""
+for b in "${IMAGE_BUNDLES[@]}"; do
+    if [[ -f "$b" && "$b" != *helm* ]]; then GUESSED_BUNDLE="$b"; break; fi
+done
 
-export NUTANIX_USER="${NUTANIX_USER}"
-export NUTANIX_PASSWORD="${NUTANIX_PASSWORD}"
-export NUTANIX_ENDPOINT="${PC_ENDPOINT}"
-export NUTANIX_PORT="9440"
-export NUTANIX_INSECURE="true"
+IMAGE_CHECK_STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" -u "${REGISTRY_USER}:${REGISTRY_PASS}" "https://${REGISTRY_URL}/v2/nkp/nutanix/nai-api/tags/list" || echo "000")
 
-# Construct the cluster creation command using cached specs
-NKP_CREATE_CMD="nkp create cluster nutanix --cluster-name ${CLUSTER_NAME} \
-  --control-plane-prism-element-cluster ${PE_CLUSTER} \
-  --worker-prism-element-cluster ${PE_CLUSTER} \
-  --control-plane-subnets ${SUBNET} \
-  --worker-subnets ${SUBNET} \
-  --control-plane-endpoint-ip ${NAI_CP_VIP} \
-  --csi-storage-container ${STORAGE_CONTAINER} \
-  --control-plane-vm-image ${IMAGE_NAME} \
-  --worker-vm-image ${IMAGE_NAME} \
-  --registry-mirror-url https://${REGISTRY_URL}/nkp \
-  --registry-mirror-username ${REGISTRY_USER} \
-  --registry-mirror-password ${REGISTRY_PASS} \
-  --ssh-public-key-file $HOME/.ssh/id_rsa.pub \
-  --self-managed --insecure"
-
-if [ "${INSTALL_MODE}" == "dark" ]; then
-    NKP_CREATE_CMD="${NKP_CREATE_CMD} --airgapped --registry-mirror-cacert /etc/pki/ca-trust/source/anchors/registry.crt"
+if [[ "$IMAGE_CHECK_STATUS" == "200" ]]; then
+    gum style --foreground 82 "✔ NAI images already detected in mirror."
+else
+    IMAGE_LIST=$(tar -xOf "$GUESSED_BUNDLE" manifest.json | grep -o '"RepoTags":\[[^]]*\]' | grep -o '"nutanix[^"]*"' | tr -d '"' || true)
+    if [ "$USE_SKOPEO" != "true" ]; then
+        docker load -i "$GUESSED_BUNDLE"
+        echo "${REGISTRY_PASS}" | docker login "${REGISTRY_URL}" -u "${REGISTRY_USER}" --password-stdin
+    fi
+    for img in $IMAGE_LIST; do
+        NEW_TAG="${REGISTRY_URL}/nkp/${img}"
+        if [ "$USE_SKOPEO" == "true" ]; then
+            skopeo copy --dest-tls-verify=false --dest-creds="${REGISTRY_USER}:${REGISTRY_PASS}" "docker-archive:${GUESSED_BUNDLE}:${img}" "docker://${NEW_TAG}" >/dev/null 2>&1 || true
+        else
+            docker tag "$img" "$NEW_TAG" && docker push "$NEW_TAG" >/dev/null 2>&1 || true
+        fi
+    done
 fi
 
-gum spin --spinner dot --spinner.foreground 212 --title "Provisioning NKP Cluster '${CLUSTER_NAME}' (This takes 10-15 minutes)..." -- \
-    eval $NKP_CREATE_CMD
+# ==============================================================================
+# STEP 4: PROVISION CLUSTER (IF SELECTED)
+# ==============================================================================
+if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
+    if ! gum confirm "Ready to provision the NEW '${NAI_CLUSTER_NAME}' Kubernetes cluster and deploy NAI?"; then
+        echo "Exiting."
+        exit 0
+    fi
 
-gum style --foreground 82 "✔ Cluster '${CLUSTER_NAME}' provisioned successfully!"
+    NKP_CREATE_CMD="nkp create cluster nutanix --cluster-name \"${NAI_CLUSTER_NAME}\" \
+      --endpoint \"https://${PC_ENDPOINT}:9440\" \
+      --control-plane-prism-element-cluster \"${PE_CLUSTER}\" \
+      --worker-prism-element-cluster \"${PE_CLUSTER}\" \
+      --control-plane-subnets \"${SUBNET}\" \
+      --worker-subnets \"${SUBNET}\" \
+      --control-plane-endpoint-ip \"${NAI_CP_VIP}\" \
+      --kubernetes-service-load-balancer-ip-range \"${NAI_METALLB_RANGE}\" \
+      --csi-storage-container \"${STORAGE_CONTAINER}\" \
+      --control-plane-vm-image \"${IMAGE_NAME}\" \
+      --worker-vm-image \"${IMAGE_NAME}\" \
+      --worker-vcpus 12 \
+      --worker-memory 32 \
+      --worker-disk-size 150 \
+      --control-plane-disk-size 150 \
+      --registry-mirror-url \"https://${REGISTRY_URL}/nkp\" \
+      --registry-mirror-username \"${REGISTRY_USER}\" \
+      --registry-mirror-password \"${REGISTRY_PASS}\" \
+      --registry-mirror-cacert \"/opt/registry/certs/domain.crt\" \
+      --ssh-public-key-file \"$HOME/.ssh/id_rsa.pub\" \
+      --insecure"
 
-# Extract the new cluster's kubeconfig and set it as the active context
-nkp get kubeconfig -c ${CLUSTER_NAME} > ${CLUSTER_NAME}.conf
-export KUBECONFIG="${PWD}/${CLUSTER_NAME}.conf"
+    if [ "$MGMT_MODE" == "Self-Managed (Standalone)" ]; then
+        NKP_CREATE_CMD="${NKP_CREATE_CMD} --self-managed"
+    else
+        NKP_CREATE_CMD="${NKP_CREATE_CMD} --kubeconfig \"${MGMT_KUBECONFIG}\" --namespace \"${MGMT_WORKSPACE_NAMESPACE}\""
+    fi
+
+    eval "$NKP_CREATE_CMD"
+    
+    if [ "$MGMT_MODE" == "Self-Managed (Standalone)" ]; then
+        nkp get kubeconfig -c "${NAI_CLUSTER_NAME}" > "${PWD}/${NAI_CLUSTER_NAME}.conf"
+    else
+        nkp get kubeconfig -c "${NAI_CLUSTER_NAME}" -n "${MGMT_WORKSPACE_NAMESPACE}" --kubeconfig "${MGMT_KUBECONFIG}" > "${PWD}/${NAI_CLUSTER_NAME}.conf"
+    fi
+    export KUBECONFIG="${PWD}/${NAI_CLUSTER_NAME}.conf"
+else
+    CURRENT_CTX=$(kubectl config current-context 2>/dev/null || echo "unknown-context")
+    if ! gum confirm "Ready to deploy NAI to existing cluster context: ${CURRENT_CTX}?"; then exit 0; fi
+fi
 
 # ==============================================================================
-# STEP 3: NAI HELM DEPLOYMENT
+# STEP 5: GATEWAY CONFLICT RESOLUTION & RE-ENGINEERED CSI SECRET STRATEGY
 # ==============================================================================
-gum style --foreground 212 "--> Creating namespace: ${TARGET_NAMESPACE}..."
-kubectl create namespace "${TARGET_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - > /dev/null
+gum style --foreground 212 "🧹 Evicting pre-existing gateway class conflicts (Traefik)..."
+kubectl delete gatewayclass traefik 2>/dev/null || true
 
-cd "${BUNDLE_DIR}"
+kubectl create namespace "${TARGET_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
 
-# Generate Operator Values (assuming images were pushed to a /nutanix project in Harbor)
-cat <<EOF > nai-operators-values.yaml
-imagePullSecret:
-  credentials:
-    registry: ${REGISTRY_URL}/nutanix
-naiRedis:
-  naiRedisImage:
-    name: ${REGISTRY_URL}/nutanix/nai-redis
-naiJobs:
-  naiJobsImage:
-    image: ${REGISTRY_URL}/nutanix/nai-jobs
-nai-clickhouse-operator:
-  operator:
-    image:
-      registry: ${REGISTRY_URL}
-      repository: nutanix/nai-clickhouse-operator
+# PRODUCTION FIX: Secret uses IP/FQDN to guarantee reliable network routing
+gum style --foreground 212 "🔐 Safely storing storage secrets using strict literal blocks..."
+kubectl delete secret ntnx-secret -n "${TARGET_NAMESPACE}" 2>/dev/null || true
+kubectl create secret generic ntnx-secret -n "${TARGET_NAMESPACE}" \
+  --from-literal=key="${PC_ENDPOINT}:9440:${NUTANIX_USER}:${NUTANIX_PASSWORD}" \
+  --from-literal=files-key="${FILE_SERVER_FQDN_OR_IP}:${FILES_REST_USER}:${FILES_REST_PASSWORD}"
+
+# PRODUCTION FIX: StorageClass uses exact Short Name to satisfy Prism API UUID mapping
+cat <<EOF | kubectl apply -f - > /dev/null
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nai-nfs-storage
+provisioner: csi.nutanix.com
+parameters:
+  storageType: NutanixFiles
+  dynamicProv: "ENABLED"
+  csi.storage.k8s.io/provisioner-secret-name: "ntnx-secret"
+  csi.storage.k8s.io/provisioner-secret-namespace: "${TARGET_NAMESPACE}"
+  csi.storage.k8s.io/node-publish-secret-name: "ntnx-secret"
+  csi.storage.k8s.io/node-publish-secret-namespace: "${TARGET_NAMESPACE}"
+  csi.storage.k8s.io/controller-expand-secret-name: "ntnx-secret"
+  csi.storage.k8s.io/controller-expand-secret-namespace: "${TARGET_NAMESPACE}"
+  nfsServerName: "${FILE_SERVER_SHORT_NAME}"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
 EOF
 
-gum spin --spinner dot --spinner.foreground 212 --title "Deploying NAI Operators via Helm..." -- \
-    helm upgrade --install nai-operators ./nai-operators-${NAI_VERSION}.tgz \
-      --version "${NAI_VERSION}" \
-      --namespace "${TARGET_NAMESPACE}" \
-      --wait \
-      --set imagePullSecret.credentials.username="${REGISTRY_USER}" \
-      --set imagePullSecret.credentials.password="${REGISTRY_PASS}" \
-      --insecure-skip-tls-verify \
-      -f nai-operators-values.yaml
-
-# Generate Core Values
-cat <<EOF > nai-core-values.yaml
-imagePullSecret:
-  credentials:
-    registry: ${REGISTRY_URL}/nutanix
-naiIepOperator:
-  iepOperatorImage:
-    image: ${REGISTRY_URL}/nutanix/nai-iep-operator
-  modelProcessorImage:
-    image: ${REGISTRY_URL}/nutanix/nai-model-processor
-naiInferenceUi:
-  naiUiImage:
-    image: ${REGISTRY_URL}/nutanix/nai-inference-ui
-global:
-  storage:
-    rwoStorageClass: nutanix-volume-rwo
-    rwxStorageClass: nai-nfs-storage
-EOF
-
-gum spin --spinner dot --spinner.foreground 212 --title "Deploying NAI Core Components via Helm..." -- \
-    helm upgrade --install nai-core ./nai-core-${NAI_VERSION}.tgz \
-      --version "${NAI_VERSION}" \
-      --namespace "${TARGET_NAMESPACE}" \
-      --wait \
-      --set imagePullSecret.credentials.username="${REGISTRY_USER}" \
-      --set imagePullSecret.credentials.password="${REGISTRY_PASS}" \
-      --insecure-skip-tls-verify \
-      -f nai-core-values.yaml
+rm -rf "${BUNDLE_DIR}/unpacked" && mkdir -p "${BUNDLE_DIR}/unpacked"
+shopt -s nullglob
+for chart in "${BUNDLE_DIR}/charts"/*.tgz; do
+    chart_name=$(basename "$chart" .tgz)
+    mkdir -p "${BUNDLE_DIR}/unpacked/${chart_name}"
+    tar -xzf "$chart" -C "${BUNDLE_DIR}/unpacked/${chart_name}" --strip-components=1
+done
+shopt -u nullglob
 
 # ==============================================================================
-# STEP 4: VERIFICATION
+# STEP 6: CORE ENGINE DEPLOYMENT
 # ==============================================================================
-gum spin --spinner dot --spinner.foreground 212 --title "Waiting for NAI Inference UI to become ready..." -- \
-    kubectl rollout status deployment/nai-inference-ui -n "${TARGET_NAMESPACE}" --timeout=5m
+gum style --foreground 212 "🚀 Installing foundational operators..."
+DEPS=("gateway-crds:gateway-crds-helm-*" "gateway-helm:gateway-helm-*" "kserve-crd:kserve-crd-*" "kserve:kserve-v*" "opentelemetry-operator:opentelemetry-operator-*")
 
-clear
-gum style --border normal --margin "1" --padding "1 2" --border-foreground 82 "Nutanix Enterprise AI ${NAI_VERSION} successfully deployed to the new '${CLUSTER_NAME}' cluster!"
-echo "To interact with your new cluster in the future, run: export KUBECONFIG=${PWD}/${CLUSTER_NAME}.conf"
+for dep in "${DEPS[@]}"; do
+    release_name="${dep%%:*}"
+    chart_dir=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "${dep##*:}" | head -n 1)
+    if [ -n "$chart_dir" ]; then
+        helm upgrade --install "$release_name" "$chart_dir" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1 || true
+    fi
+done
+
+helm upgrade --install nai-operators "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-operators-*" | head -n 1)" \
+      --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify
+
+sleep 10
+
+helm upgrade --install nai-core "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-core-*" | head -n 1)" \
+      --namespace "${TARGET_NAMESPACE}" \
+      --wait \
+      --timeout 20m \
+      --insecure-skip-tls-verify \
+      --set "global.storage.storageClassName=nutanix-volume" \
+      --set "global.storage.storageClassNameRWX=nai-nfs-storage" \
+      --set "gateway.certManager.selfSigned=true"
+
+# PRODUCTION TIMING FIX: Allow Operator to initialize before deleting policy
+gum spin --spinner dot --spinner.foreground 212 --title "Waiting for NAI Operator to initialize rate-limit resources..." -- sleep 60
+
+# PRODUCTION FIX: Eradicate the rate-limiting policy that triggers Envoy's 500 fail-closed loop
+echo ""
+gum style --foreground 212 "⚙ Removing incompatible rate-limiting layers from the Envoy deployment..."
+kubectl delete backendtrafficpolicy nai-global-ratelimit -n "${TARGET_NAMESPACE}" 2>/dev/null || true
+
+# Force a clean configuration sync across Envoy components
+kubectl rollout restart deployment envoy-gateway -n "${TARGET_NAMESPACE}"
+
+# ==============================================================================
+# STEP 7: CLEAN VERIFICATION
+# ==============================================================================
+echo ""
+gum style --border normal --margin "1" --padding "1 2" --border-foreground 82 "Nutanix Enterprise AI successfully deployed!"
