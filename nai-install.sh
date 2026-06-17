@@ -360,34 +360,56 @@ done
 shopt -u nullglob
 
 # ==============================================================================
-# STEP 6: CORE ENGINE DEPLOYMENT
+# STEP 6: CORE ENGINE DEPLOYMENT (PATCHED FOR NAI-3712)
 # ==============================================================================
-gum style --foreground 212 "🚀 Installing foundational operators..."
-DEPS=("gateway-crds:gateway-crds-helm-*" "gateway-helm:gateway-helm-*" "kserve-crd:kserve-crd-*" "kserve:kserve-v*" "opentelemetry-operator:opentelemetry-operator-*")
+gum style --foreground 212 "🚀 Installing foundational operators with Unified AI Gateway enabled..."
 
-for dep in "${DEPS[@]}"; do
-    release_name="${dep%%:*}"
-    chart_dir=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "${dep##*:}" | head -n 1)
-    if [ -n "$chart_dir" ]; then
-        if [ "$release_name" == "kserve" ]; then
-            # PRODUCTION FIX: Inject RawDeployment to prevent UI ServerlessModeRejected errors
-            helm upgrade --install "$release_name" "$chart_dir" \
-                --namespace "${TARGET_NAMESPACE}" \
-                --wait --insecure-skip-tls-verify \
-                --set "kserve.controller.deploymentMode=RawDeployment" >/dev/null 2>&1 || true
-        else
-            helm upgrade --install "$release_name" "$chart_dir" \
-                --namespace "${TARGET_NAMESPACE}" \
-                --wait --insecure-skip-tls-verify >/dev/null 2>&1 || true
-        fi
-    fi
-done
+# 1. Install Gateway CRDs first
+GATEWAY_CRD_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-crds-helm-*" | head -n 1)
+if [ -n "$GATEWAY_CRD_DIR" ]; then
+    helm upgrade --install gateway-crds "$GATEWAY_CRD_DIR" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
+fi
 
+# 2. Install KServe CRDs
+KSERVE_CRD_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-crd-*" | head -n 1)
+if [ -n "$KSERVE_CRD_DIR" ]; then
+    helm upgrade --install kserve-crd "$KSERVE_CRD_DIR" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
+fi
+
+# 3. Install OpenTelemetry
+OTEL_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "opentelemetry-operator-*" | head -n 1)
+if [ -n "$OTEL_DIR" ]; then
+    helm upgrade --install opentelemetry-operator "$OTEL_DIR" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
+fi
+
+# 4. Install KServe with RawDeployment Fix
+KSERVE_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-v*" | head -n 1)
+if [ -n "$KSERVE_DIR" ]; then
+    helm upgrade --install kserve "$KSERVE_DIR" \
+        --namespace "${TARGET_NAMESPACE}" \
+        --wait --insecure-skip-tls-verify \
+        --set "kserve.controller.deploymentMode=RawDeployment" >/dev/null 2>&1
+fi
+
+# 5. FIXED: Install Envoy Gateway with Explicit AI Engine Activation (NAI-3712)
+GATEWAY_HELM_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-helm-*" | head -n 1)
+if [ -n "$GATEWAY_HELM_DIR" ]; then
+    gum style --foreground 212 "⚙ Activating AI WASM Extension Filters and Rate Limiter..."
+    helm upgrade --install gateway-helm "$GATEWAY_HELM_DIR" \
+        --namespace "${TARGET_NAMESPACE}" \
+        --wait --insecure-skip-tls-verify \
+        --set "aiGateway.enabled=true" \
+        --set "rateLimit.enabled=true" \
+        --set "gateway.enabled=true"
+fi
+
+# 6. Install Core NAI Operators
 helm upgrade --install nai-operators "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-operators-*" | head -n 1)" \
       --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify
 
 sleep 10
 
+# 7. Final NAI Core Stack Deployment
 helm upgrade --install nai-core "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-core-*" | head -n 1)" \
       --namespace "${TARGET_NAMESPACE}" \
       --wait \
@@ -396,17 +418,6 @@ helm upgrade --install nai-core "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -na
       --set "global.storage.storageClassName=nutanix-volume" \
       --set "global.storage.storageClassNameRWX=nai-nfs-storage" \
       --set "gateway.certManager.selfSigned=true"
-
-# PRODUCTION TIMING FIX: Allow Operator to initialize before deleting policy
-gum spin --spinner dot --spinner.foreground 212 --title "Waiting for NAI Operator to initialize rate-limit resources..." -- sleep 60
-
-# PRODUCTION FIX: Eradicate the rate-limiting policy that triggers Envoy's 500 fail-closed loop
-echo ""
-gum style --foreground 212 "⚙ Removing incompatible rate-limiting layers from the Envoy deployment..."
-kubectl delete backendtrafficpolicy nai-global-ratelimit -n "${TARGET_NAMESPACE}" 2>/dev/null || true
-
-# Force a clean configuration sync across Envoy components
-kubectl rollout restart deployment envoy-gateway -n "${TARGET_NAMESPACE}"
 
 # ==============================================================================
 # STEP 7: CLEAN VERIFICATION
