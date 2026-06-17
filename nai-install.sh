@@ -360,7 +360,7 @@ done
 shopt -u nullglob
 
 # ==============================================================================
-# STEP 6: CORE ENGINE DEPLOYMENT (PATCHED FOR NAI-3712)
+# STEP 6: CORE ENGINE DEPLOYMENT (PATCHED FOR NAI-3712 & KSERVE RAWDEPLOYMENT)
 # ==============================================================================
 gum style --foreground 212 "🚀 Installing foundational operators with Unified AI Gateway enabled..."
 
@@ -385,13 +385,14 @@ fi
 # 4. Install KServe with RawDeployment Fix
 KSERVE_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-v*" | head -n 1)
 if [ -n "$KSERVE_DIR" ]; then
+    gum style --foreground 212 "⚙ Installing KServe (RawDeployment Mode)..."
     helm upgrade --install kserve "$KSERVE_DIR" \
         --namespace "${TARGET_NAMESPACE}" \
         --wait --insecure-skip-tls-verify \
         --set "kserve.controller.deploymentMode=RawDeployment" >/dev/null 2>&1
 fi
 
-# 5. FIXED: Install Envoy Gateway with Explicit AI Engine Activation (NAI-3712)
+# 5. Install Envoy Gateway with Explicit AI Engine Activation & Bound Redis Backend (NAI-3712)
 GATEWAY_HELM_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-helm-*" | head -n 1)
 if [ -n "$GATEWAY_HELM_DIR" ]; then
     gum style --foreground 212 "⚙ Activating AI WASM Extension Filters and Rate Limiter..."
@@ -400,16 +401,57 @@ if [ -n "$GATEWAY_HELM_DIR" ]; then
         --wait --insecure-skip-tls-verify \
         --set "aiGateway.enabled=true" \
         --set "rateLimit.enabled=true" \
-        --set "gateway.enabled=true"
+        --set "gateway.enabled=true" >/dev/null 2>&1
+
+    gum style --foreground 212 "⚙ Injecting root rateLimit definitions to config mappings..."
+    kubectl patch configmap envoy-gateway-config -n "${TARGET_NAMESPACE}" --type=merge -p "
+data:
+  envoy-gateway.yaml: |
+    apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyGateway
+    extensionApis: {}
+    gateway:
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+    logging:
+      level:
+        default: info
+    provider:
+      kubernetes:
+        rateLimitDeployment:
+          container:
+            image: docker.io/envoyproxy/ratelimit:3fb70258
+            patch:
+              type: StrategicMerge
+              value:
+                spec:
+                  template:
+                    spec:
+                      containers:
+                      - imagePullPolicy: IfNotPresent
+                        name: envoy-ratelimit
+        shutdownManager:
+          image: docker.io/envoyproxy/gateway:v1.7.0
+      type: Kubernetes
+    rateLimit:
+      backend:
+        type: Redis
+        redis:
+          url: redis-standalone.${TARGET_NAMESPACE}.svc.cluster.local:6379
+"
+    # Restart the gateway controller to apply the injected YAML config
+    kubectl rollout restart deployment envoy-gateway -n "${TARGET_NAMESPACE}"
 fi
 
 # 6. Install Core NAI Operators
+gum style --foreground 212 "⚙ Installing Core NAI Operators..."
 helm upgrade --install nai-operators "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-operators-*" | head -n 1)" \
-      --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify
+      --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
 
+# Give operators a moment to register CRDs
 sleep 10
 
 # 7. Final NAI Core Stack Deployment
+gum style --foreground 212 "⚙ Installing Final NAI Core Stack..."
 helm upgrade --install nai-core "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-core-*" | head -n 1)" \
       --namespace "${TARGET_NAMESPACE}" \
       --wait \
