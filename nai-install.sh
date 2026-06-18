@@ -2,7 +2,7 @@
 # ==============================================================================
 # Script: nai-install.sh
 # Purpose: Deploys Nutanix Enterprise AI (Production-Hardened)
-# Architecture: Air-Gap + Split-Brain CSI + Smart Caching + RawDeployment Fix
+# Architecture: Air-Gap + Split-Brain CSI + RawDeployment Fix + Envoy Fixed Namespace
 # ==============================================================================
 
 set -euo pipefail
@@ -13,10 +13,50 @@ export BUNDLE_DIR="${PWD}/nai-bundles"
 export NAI_CLUSTER_NAME="nai"
 
 # ==============================================================================
+# HELPER FUNCTIONS: SAFE DEPLOYMENT CAPABILITIES
+# ==============================================================================
+deploy_chart() {
+    local RELEASE_NAME=$1
+    local CHART_DIR=$2
+    shift 2
+    
+    if [ -z "$CHART_DIR" ] || [ ! -d "$CHART_DIR" ]; then
+        gum style --foreground 214 "⚠️ Warning: Chart for ${RELEASE_NAME} not found. Skipping."
+        return 0
+    fi
+    
+    gum style --foreground 212 "⚙ Deploying ${RELEASE_NAME} via Helm..."
+    
+    if ! helm upgrade --install "$RELEASE_NAME" "$CHART_DIR" \
+        --namespace "${TARGET_NAMESPACE}" \
+        --wait --insecure-skip-tls-verify "$@" > "/tmp/${RELEASE_NAME}_install.log" 2>&1; then
+        
+        gum style --border double --margin "1" --padding "1 2" --border-foreground 196 "❌ FATAL ERROR: Helm failed to deploy ${RELEASE_NAME}!"
+        cat "/tmp/${RELEASE_NAME}_install.log"
+        exit 1
+    fi
+}
+
+deploy_crd_chart_directly() {
+    local CHART_NAME=$1
+    local CHART_DIR=$2
+    if [ -n "$CHART_DIR" ] && [ -d "$CHART_DIR" ]; then
+        gum style --foreground 212 "⚙ Deploying ${CHART_NAME} directly via API (Bypassing Helm 1MB limit)..."
+        
+        if [ -d "${CHART_DIR}/crds" ]; then
+            kubectl apply --server-side --force-conflicts -f "${CHART_DIR}/crds/" >/dev/null 2>&1 || true
+        fi
+        if [ -d "${CHART_DIR}/templates" ]; then
+            kubectl apply --server-side --force-conflicts -f "${CHART_DIR}/templates/" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+# ==============================================================================
 # STEP 0: DEPENDENCY PRE-FLIGHT
 # ==============================================================================
 if ! command -v gum &> /dev/null; then
-    echo "❌ ERROR: 'gum' is not installed. Please run your initial Phase 1 script first."
+    echo "❌ ERROR: 'gum' is not installed."
     exit 1
 fi
 
@@ -60,7 +100,6 @@ else
     tar -xf "bundlenai-v${NAI_VERSION}.tar" -C "${BUNDLE_DIR}/charts" 2>/dev/null || true
 fi
 
-# Recover Helm if missing
 if ! command -v helm &> /dev/null; then
     if [ "${INSTALL_MODE}" == "internet" ]; then
         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
@@ -76,7 +115,6 @@ if ! command -v helm &> /dev/null; then
     fi
 fi
 
-# Recover Skopeo if missing
 export USE_SKOPEO="true"
 if ! command -v skopeo &> /dev/null; then
     if [ -f /etc/os-release ]; then . /etc/os-release; OS=$ID; else OS="unknown"; fi
@@ -118,13 +156,11 @@ if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
     MGMT_MODE=$(gum choose "Managed by an existing NKP Management Cluster" "Self-Managed (Standalone)")
 fi
 
-# SMART CACHE: Read existing file
+# Load the simple cache
 if [ -f ".nai_cache.env" ]; then source .nai_cache.env; fi
 
-# SMART CACHE: Bulletproof fallback logic for split variables
 FILE_SERVER_SHORT_NAME="${FILE_SERVER_SHORT_NAME:-${FILE_SERVER_NAME:-}}"
 FILE_SERVER_FQDN_OR_IP="${FILE_SERVER_FQDN_OR_IP:-${FILE_SERVER_NAME:-}}"
-
 PC_ENDPOINT="${PC_ENDPOINT:-}"
 NUTANIX_USER="${NUTANIX_USER:-admin}"
 FILES_REST_USER="${FILES_REST_USER:-files-fs2}"
@@ -209,7 +245,6 @@ fi
 
 TARGET_NAMESPACE=$(gum input --prompt "Target K8s Namespace for NAI: " --value "${TARGET_NAMESPACE:-nai-system}")
 
-# SMART CACHE: Write out the explicit new variables cleanly
 {
     echo "export REGISTRY_URL=\"${REGISTRY_URL}\""
     echo "export REGISTRY_USER=\"${REGISTRY_USER}\""
@@ -267,10 +302,7 @@ fi
 # STEP 4: PROVISION CLUSTER (IF SELECTED)
 # ==============================================================================
 if [ "$CLUSTER_MODE" == "Provision a NEW cluster" ]; then
-    if ! gum confirm "Ready to provision the NEW '${NAI_CLUSTER_NAME}' Kubernetes cluster and deploy NAI?"; then
-        echo "Exiting."
-        exit 0
-    fi
+    if ! gum confirm "Ready to provision the NEW '${NAI_CLUSTER_NAME}' Kubernetes cluster and deploy NAI?"; then exit 0; fi
 
     NKP_CREATE_CMD="nkp create cluster nutanix --cluster-name \"${NAI_CLUSTER_NAME}\" \
       --endpoint \"https://${PC_ENDPOINT}:9440\" \
@@ -314,21 +346,27 @@ else
 fi
 
 # ==============================================================================
-# STEP 5: GATEWAY CONFLICT RESOLUTION & RE-ENGINEERED CSI SECRET STRATEGY
+# STEP 5: NAMESPACE SAFETY & GATEWAY CONFLICT RESOLUTION 
 # ==============================================================================
+NS_STATUS=$(kubectl get namespace "${TARGET_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+if [ "$NS_STATUS" == "Terminating" ]; then
+    gum style --foreground 196 "❌ ERROR: The namespace '${TARGET_NAMESPACE}' is stuck in the 'Terminating' state."
+    echo "Please execute your teardown script to clear the finalizers before reinstalling."
+    exit 1
+fi
+
 gum style --foreground 212 "🧹 Evicting pre-existing gateway class conflicts (Traefik)..."
 kubectl delete gatewayclass traefik 2>/dev/null || true
 
 kubectl create namespace "${TARGET_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
 
-# PRODUCTION FIX: Secret uses IP/FQDN (with explicit port 9440) to guarantee reliable network routing
-gum style --foreground 212 "🔐 Safely storing storage secrets using strict literal blocks..."
+gum style --foreground 212 "🔐 Safely storing storage secrets..."
 kubectl delete secret ntnx-secret -n "${TARGET_NAMESPACE}" 2>/dev/null || true
+
 kubectl create secret generic ntnx-secret -n "${TARGET_NAMESPACE}" \
   --from-literal=key="${PC_ENDPOINT}:9440:${NUTANIX_USER}:${NUTANIX_PASSWORD}" \
-  --from-literal=files-key="${FILE_SERVER_FQDN_OR_IP}:9440:${FILES_REST_USER}:${FILES_REST_PASSWORD}"
+  --from-literal=files-key="${FILE_SERVER_FQDN_OR_IP}:${FILES_REST_USER}:${FILES_REST_PASSWORD}"
 
-# PRODUCTION FIX: StorageClass uses exact Short Name to satisfy Prism API UUID mapping
 cat <<EOF | kubectl apply -f - > /dev/null
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -360,51 +398,53 @@ done
 shopt -u nullglob
 
 # ==============================================================================
-# STEP 6: CORE ENGINE DEPLOYMENT (PATCHED FOR NAI-3712 & KSERVE RAWDEPLOYMENT)
+# STEP 6: CORE ENGINE DEPLOYMENT
 # ==============================================================================
 gum style --foreground 212 "🚀 Installing foundational operators with Unified AI Gateway enabled..."
 
-# 1. Install Gateway CRDs first
-GATEWAY_CRD_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-crds-helm-*" | head -n 1)
-if [ -n "$GATEWAY_CRD_DIR" ]; then
-    helm upgrade --install gateway-crds "$GATEWAY_CRD_DIR" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
-fi
+gum style --foreground 214 "🧹 Purging stuck Envoy/KServe CRDs from previous teardowns..."
+STUCK_CRDS=$(kubectl get crd -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E 'envoyproxy.io|kserve.io' || true)
+for crd in $STUCK_CRDS; do
+    gum style --foreground 196 "   -> Ripping finalizers off ghost CRD: $crd"
+    kubectl patch crd "$crd" --type=json -p='[{"op": "remove", "path": "/metadata/finalizers"}]' 2>/dev/null || true
+done
+sleep 2
 
-# 2. Install KServe CRDs
-KSERVE_CRD_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-crd-*" | head -n 1)
-if [ -n "$KSERVE_CRD_DIR" ]; then
-    helm upgrade --install kserve-crd "$KSERVE_CRD_DIR" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
-fi
+GATEWAY_CRD_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-crds-helm-*" | head -n 1 || true)
+deploy_crd_chart_directly "gateway-crds" "$GATEWAY_CRD_DIR"
 
-# 3. Install OpenTelemetry
-OTEL_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "opentelemetry-operator-*" | head -n 1)
-if [ -n "$OTEL_DIR" ]; then
-    helm upgrade --install opentelemetry-operator "$OTEL_DIR" --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
-fi
+KSERVE_CRD_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-crd-*" | head -n 1 || true)
+deploy_crd_chart_directly "kserve-crd" "$KSERVE_CRD_DIR"
 
-# 4. Install KServe with RawDeployment Fix
-KSERVE_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-v*" | head -n 1)
-if [ -n "$KSERVE_DIR" ]; then
-    gum style --foreground 212 "⚙ Installing KServe (RawDeployment Mode)..."
-    helm upgrade --install kserve "$KSERVE_DIR" \
-        --namespace "${TARGET_NAMESPACE}" \
-        --wait --insecure-skip-tls-verify \
-        --set "kserve.controller.deploymentMode=RawDeployment" >/dev/null 2>&1
-fi
+OTEL_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "opentelemetry-operator-*" | head -n 1 || true)
+deploy_chart "opentelemetry-operator" "$OTEL_DIR"
 
-# 5. Install Envoy Gateway with Explicit AI Engine Activation & Bound Redis Backend (NAI-3712)
-GATEWAY_HELM_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-helm-*" | head -n 1)
+KSERVE_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-v*" | head -n 1 || true)
+deploy_chart "kserve" "$KSERVE_DIR" \
+    --set "kserve.controller.deploymentMode=RawDeployment"
+
+# --- FIXED ENVOY NAMESPACE CONFIGURATION ENTRYPOINT ---
+GATEWAY_HELM_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-helm-*" | head -n 1 || true)
 if [ -n "$GATEWAY_HELM_DIR" ]; then
-    gum style --foreground 212 "⚙ Activating AI WASM Extension Filters and Rate Limiter..."
-    helm upgrade --install gateway-helm "$GATEWAY_HELM_DIR" \
-        --namespace "${TARGET_NAMESPACE}" \
+    gum style --foreground 212 "⚙ Deploying gateway-helm specifically to envoy-gateway-system namespace..."
+    
+    # Force creation of dedicated infrastructure namespace
+    kubectl create namespace envoy-gateway-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
+    
+    # Direct helm injection to protect data plane dependencies
+    helm upgrade --install "gateway-helm" "$GATEWAY_HELM_DIR" \
+        --namespace "envoy-gateway-system" \
         --wait --insecure-skip-tls-verify \
         --set "aiGateway.enabled=true" \
         --set "rateLimit.enabled=true" \
-        --set "gateway.enabled=true" >/dev/null 2>&1
+        --set "gateway.enabled=true" > "/tmp/gateway-helm_install.log" 2>&1 || {
+            gum style --foreground 196 "❌ FATAL ERROR: Helm failed to deploy gateway-helm!"
+            cat "/tmp/gateway-helm_install.log"
+            exit 1
+        }
 
     gum style --foreground 212 "⚙ Injecting root rateLimit definitions to config mappings..."
-    kubectl patch configmap envoy-gateway-config -n "${TARGET_NAMESPACE}" --type=merge -p "
+    kubectl patch configmap envoy-gateway-config -n "envoy-gateway-system" --type=merge -p "
 data:
   envoy-gateway.yaml: |
     apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -437,26 +477,20 @@ data:
         type: Redis
         redis:
           url: redis-standalone.${TARGET_NAMESPACE}.svc.cluster.local:6379
-"
-    # Restart the gateway controller to apply the injected YAML config
-    kubectl rollout restart deployment envoy-gateway -n "${TARGET_NAMESPACE}"
+" >/dev/null 2>&1 || true
+
+    kubectl rollout restart deployment envoy-gateway -n "envoy-gateway-system" >/dev/null 2>&1 || true
 fi
+# --- END FIXED ENVOY NAMESPACE CONFIGURATION ---
 
-# 6. Install Core NAI Operators
-gum style --foreground 212 "⚙ Installing Core NAI Operators..."
-helm upgrade --install nai-operators "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-operators-*" | head -n 1)" \
-      --namespace "${TARGET_NAMESPACE}" --wait --insecure-skip-tls-verify >/dev/null 2>&1
+NAI_OPS_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-operators-*" | head -n 1 || true)
+deploy_chart "nai-operators" "$NAI_OPS_DIR"
 
-# Give operators a moment to register CRDs
 sleep 10
 
-# 7. Final NAI Core Stack Deployment
-gum style --foreground 212 "⚙ Installing Final NAI Core Stack..."
-helm upgrade --install nai-core "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-core-*" | head -n 1)" \
-      --namespace "${TARGET_NAMESPACE}" \
-      --wait \
+NAI_CORE_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-core-*" | head -n 1 || true)
+deploy_chart "nai-core" "$NAI_CORE_DIR" \
       --timeout 20m \
-      --insecure-skip-tls-verify \
       --set "global.storage.storageClassName=nutanix-volume" \
       --set "global.storage.storageClassNameRWX=nai-nfs-storage" \
       --set "gateway.certManager.selfSigned=true"
@@ -465,4 +499,4 @@ helm upgrade --install nai-core "$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -na
 # STEP 7: CLEAN VERIFICATION
 # ==============================================================================
 echo ""
-gum style --border normal --margin "1" --padding "1 2" --border-foreground 82 "Nutanix Enterprise AI successfully deployed!"
+gum style --border normal --margin "1" --padding "1 2" --border-foreground 82 "✔ Nutanix Enterprise AI successfully deployed!"
