@@ -15,7 +15,12 @@ A deployment script for **Nutanix Enterprise AI**, designed for air-gapped (dark
 - [Configuration Reference](#configuration-reference)
 - [Uninstall & Reinstall](#uninstall--reinstall)
 - [Architecture Notes](#architecture-notes)
-- [Troubleshooting](#troubleshooting)
+- [Monitoring & Troubleshooting](#monitoring--troubleshooting)
+  - [AI Model Health](#1-ai-model-health-kserve)
+  - [Pod & Gateway Diagnostics](#2-pod--gateway-diagnostics)
+  - [Resource Utilization](#3-resource-utilization)
+  - [Cluster-Wide Events](#4-cluster-wide-events)
+  - [Common Install Issues](#5-common-install-issues)
 
 ---
 
@@ -300,7 +305,7 @@ For NAI **≤ 2.7.x**, the installer applies a compatibility patch that:
 - Configures Redis rate limiting pointed at the NAI-managed Redis instance
 - Bounces Envoy control plane pods to pick up the new configuration
 
-For NAI **2.8+**, standard Helm deployment is used and the patch is skipped automatically.(assuming this gets fixed in the next upcoming release)
+For NAI **2.8+**, standard Helm deployment is used and the patch is skipped automatically.
 
 ### Ghost CRD Cleanup
 
@@ -308,10 +313,123 @@ Before deployment, the installer removes finalizers from any stuck `envoyproxy.i
 
 ---
 
-## Troubleshooting
+## Monitoring & Troubleshooting
+
+### 1. AI Model Health (KServe)
+
+NAI uses KServe to run AI models. These commands let you inspect the state of deployed models and their backing pods.
+
+**List all active inference models and their readiness state:**
+```bash
+kubectl get inferenceservices -n nai-system
+```
+This shows every deployed model, its ready status, and the internal URL it is listening on.
+
+**Find the specific pod running a model:**
+```bash
+kubectl get pods -n nai-system -l serving.kserve.io/inferenceservice=<model-name>
+```
+If a model shows as Active in the NAI UI but requests are failing, check this pod directly — a vLLM engine crash due to insufficient GPU memory will appear here.
+
+---
+
+### 2. Pod & Gateway Diagnostics
+
+**Check the state of all Envoy Gateway components:**
+```bash
+kubectl get pods -n envoy-gateway-system
+```
+Look for `3/3 Ready` on the ingress pod — the third container is the NAI AI sidecar (the JSON parser). If it shows `2/3`, the sidecar has not injected successfully.
+
+**Search for Envoy proxy pods across all namespaces:**
+```bash
+kubectl get pods -A | grep envoy-nai-system-nai-ingress
+```
+Useful for tracking down where Envoy proxies are actually running after a gateway restart or reconfiguration.
+
+**Inspect the gateway's load balancer IP and node ports:**
+```bash
+kubectl get svc -n envoy-gateway-system
+```
+Use this to find the External IP assigned by MetalLB and verify the service endpoints for building test requests.
+
+**Describe a pod to diagnose startup failures:**
+```bash
+kubectl describe pod <pod-name> -n <namespace>
+```
+Scroll to the **Events** section at the bottom. This is the first place to look for any pod stuck in `Pending` or `CrashLoopBackOff` — it will show the exact reason (e.g., insufficient memory, failed image pull, volume not found).
+
+**View pod logs:**
+```bash
+kubectl logs <pod-name> -n <namespace>
+```
+
+**View logs from a specific container in the Envoy ingress pod:**
+```bash
+kubectl logs <ingress-pod-name> -n envoy-gateway-system -c nai-extproc
+```
+The ingress pod runs three containers, so the `-c` flag is required. The `nai-extproc` container is the AI gateway JSON parser — if requests are returning 500 errors, its logs will show exactly how it is failing to read or route the model name.
+
+**Force-restart the Envoy control plane to pick up config changes:**
+```bash
+kubectl delete pod -n envoy-gateway-system -l control-plane=envoy-gateway
+```
+Deleting the control plane pod forces an immediate reboot. The controller will re-read the `EnvoyGateway` ConfigMap and spawn fresh proxy pods. Use this after manually patching gateway configuration.
+
+---
+
+### 3. Resource Utilization
+
+AI models are resource-intensive. Use these commands to verify your cluster nodes are not saturated.
+
+**Node-level CPU and memory consumption:**
+```bash
+kubectl top nodes
+```
+
+**Per-pod CPU and memory consumption in the NAI namespace:**
+```bash
+kubectl top pods -n nai-system
+```
+
+---
+
+### 4. Cluster-Wide Events
+
+**Chronological event timeline for the NAI namespace:**
+```bash
+kubectl get events -n nai-system --sort-by='.metadata.creationTimestamp'
+```
+If components are crashing and restarting in a loop, this gives you the exact sequence of events leading up to the failure — more useful than pod logs alone when the cause is not obvious.
+
+---
+
+### 5. Common Install Issues
 
 **Namespace stuck in `Terminating`**
 Run `nai-teardown.sh` to strip finalizers and force-close the namespace before reinstalling. The installer will exit early with an explicit error if this condition is detected on startup.
+
+**Ghost ClusterRole blocking reinstall**
+If Helm fails during gateway deployment with a permissions conflict, manually remove the leftover cluster-scoped role from a previous install:
+```bash
+kubectl delete clusterrole gateway-helm-envoy-gateway-role --ignore-not-found
+kubectl delete clusterrolebinding gateway-helm-envoy-gateway-rolebinding --ignore-not-found
+```
+The teardown script handles this automatically, but it can be run manually if needed.
+
+**CRD stuck with finalizers**
+If a KServe or Envoy CRD is stuck and blocking deletion:
+```bash
+kubectl patch crd <crd-name> --type=json -p='[{"op": "remove", "path": "/metadata/finalizers"}]'
+```
+
+**Force-finalize a stuck namespace**
+When a namespace is stuck in `Terminating` and standard deletion is not working:
+```bash
+kubectl get namespace <namespace> -o json   | tr -d "
+"   | sed 's/"finalizers": \[[^]]\+\]/"finalizers": []/'   | kubectl replace --raw /api/v1/namespaces/<namespace>/finalize -f -
+```
+This bypasses standard API protections and forces Kubernetes to immediately drop the namespace. The teardown script runs this automatically for `nai-system`, `nai-admin`, and `envoy-gateway-system`.
 
 **Helm deploy fails with a 1MB limit error**
 CRD-heavy charts (`gateway-crds`, `kserve-crd`) are applied directly via `kubectl apply --server-side` to bypass this limit. If you see this error for another chart, check the chart size and consider splitting CRDs manually.
