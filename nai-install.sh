@@ -2,7 +2,7 @@
 # ==============================================================================
 # Script: nai-install.sh
 # Purpose: Deploys Nutanix Enterprise AI (Production-Hardened)
-# Architecture: Air-Gap + Split-Brain CSI + RawDeployment Fix + Envoy Fixed Namespace
+# Architecture: Air-Gap + Split-Brain CSI + Version-Aware Envoy Gateway Patching
 # ==============================================================================
 
 set -euo pipefail
@@ -15,6 +15,10 @@ export NAI_CLUSTER_NAME="nai"
 # ==============================================================================
 # HELPER FUNCTIONS: SAFE DEPLOYMENT CAPABILITIES
 # ==============================================================================
+version_le() {
+    [ "$1" == "$(echo -e "$1\n$2" | sort -V | head -n1)" ]
+}
+
 deploy_chart() {
     local RELEASE_NAME=$1
     local CHART_DIR=$2
@@ -398,7 +402,7 @@ done
 shopt -u nullglob
 
 # ==============================================================================
-# STEP 6: CORE ENGINE DEPLOYMENT
+# STEP 6: CORE ENGINE DEPLOYMENT + VERSION-AWARE ENVOY PATCH
 # ==============================================================================
 gum style --foreground 212 "🚀 Installing foundational operators with Unified AI Gateway enabled..."
 
@@ -423,65 +427,111 @@ KSERVE_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "kserve-v*" | head 
 deploy_chart "kserve" "$KSERVE_DIR" \
     --set "kserve.controller.deploymentMode=RawDeployment"
 
-# --- FIXED ENVOY NAMESPACE CONFIGURATION ENTRYPOINT ---
+# --- VERSION-AWARE ENVOY NAMESPACE CONFIGURATION ENTRYPOINT ---
 GATEWAY_HELM_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "gateway-helm-*" | head -n 1 || true)
 if [ -n "$GATEWAY_HELM_DIR" ]; then
-    gum style --foreground 212 "⚙ Deploying gateway-helm specifically to envoy-gateway-system namespace..."
-    
-    # Force creation of dedicated infrastructure namespace
-    kubectl create namespace envoy-gateway-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
-    
-    # Direct helm injection to protect data plane dependencies
-    helm upgrade --install "gateway-helm" "$GATEWAY_HELM_DIR" \
-        --namespace "envoy-gateway-system" \
-        --wait --insecure-skip-tls-verify \
-        --set "aiGateway.enabled=true" \
-        --set "rateLimit.enabled=true" \
-        --set "gateway.enabled=true" > "/tmp/gateway-helm_install.log" 2>&1 || {
-            gum style --foreground 196 "❌ FATAL ERROR: Helm failed to deploy gateway-helm!"
-            cat "/tmp/gateway-helm_install.log"
-            exit 1
-        }
 
-    gum style --foreground 212 "⚙ Injecting root rateLimit definitions to config mappings..."
-    kubectl patch configmap envoy-gateway-config -n "envoy-gateway-system" --type=merge -p "
+    if version_le "$NAI_VERSION" "2.7.99"; then
+        gum style --foreground 214 "⚠️ NAI Version ${NAI_VERSION} detected. Applying the Envoy Gateway 2.7.x Patch..."
+        
+        # Force creation of dedicated infrastructure namespace
+        kubectl create namespace envoy-gateway-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
+        
+        # Direct helm injection to protect data plane dependencies
+        helm upgrade --install "gateway-helm" "$GATEWAY_HELM_DIR" \
+            --namespace "envoy-gateway-system" \
+            --wait --insecure-skip-tls-verify \
+            --set "aiGateway.enabled=true" \
+            --set "rateLimit.enabled=true" \
+            --set "gateway.enabled=true" > "/tmp/gateway-helm_install.log" 2>&1 || {
+                gum style --foreground 196 "❌ FATAL ERROR: Helm failed to deploy gateway-helm!"
+                cat "/tmp/gateway-helm_install.log"
+                exit 1
+            }
+
+        gum style --foreground 212 "⚙ Injecting Master AI Extension policies to envoy-gateway-config..."
+        cat <<EOF | kubectl apply -f - > /dev/null
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-gateway-config
+  namespace: envoy-gateway-system
 data:
   envoy-gateway.yaml: |
     apiVersion: gateway.envoyproxy.io/v1alpha1
     kind: EnvoyGateway
-    extensionApis: {}
     gateway:
       controllerName: gateway.envoyproxy.io/gatewayclass-controller
     logging:
       level:
         default: info
     provider:
+      type: Kubernetes
       kubernetes:
         rateLimitDeployment:
           container:
             image: docker.io/envoyproxy/ratelimit:3fb70258
-            patch:
-              type: StrategicMerge
-              value:
-                spec:
-                  template:
-                    spec:
-                      containers:
-                      - imagePullPolicy: IfNotPresent
-                        name: envoy-ratelimit
+          patch:
+            type: StrategicMerge
+            value:
+              spec:
+                template:
+                  spec:
+                    containers:
+                    - imagePullPolicy: IfNotPresent
+                      name: envoy-ratelimit
         shutdownManager:
           image: docker.io/envoyproxy/gateway:v1.7.0
-      type: Kubernetes
     rateLimit:
       backend:
         type: Redis
         redis:
           url: redis-standalone.${TARGET_NAMESPACE}.svc.cluster.local:6379
-" >/dev/null 2>&1 || true
+    extensionApis:
+      enableBackend: true
+      enableEnvoyPatchPolicy: true
+    extensionManager:
+      maxMessageSize: 11Mi
+      backendResources:
+      - group: inference.networking.k8s.io
+        kind: InferencePool
+        version: v1
+      hooks:
+        xdsTranslator:
+          post:
+          - Translation
+          - Cluster
+          - Route
+          translation:
+            cluster:
+              includeAll: true
+            listener:
+              includeAll: true
+            route:
+              includeAll: true
+            secret:
+              includeAll: true
+      service:
+        fqdn:
+          hostname: ai-gateway-controller.${TARGET_NAMESPACE}.svc.cluster.local
+          port: 1063
+EOF
 
-    kubectl rollout restart deployment envoy-gateway -n "envoy-gateway-system" >/dev/null 2>&1 || true
+        # Force control plane to pick up the expanded spec and rebuild proxy hooks
+        kubectl delete deploy -n envoy-gateway-system -l app.kubernetes.io/name=envoy >/dev/null 2>&1 || true
+        kubectl delete pod -n envoy-gateway-system -l control-plane=envoy-gateway >/dev/null 2>&1 || true
+
+    else
+        # For NAI 2.8+ versions, just let the standard deployment handle it natively
+        gum style --foreground 82 "✔ NAI Version ${NAI_VERSION} is 2.8+. Bypassing the legacy Envoy patch..."
+        
+        deploy_chart "gateway-helm" "$GATEWAY_HELM_DIR" \
+            --set "aiGateway.enabled=true" \
+            --set "rateLimit.enabled=true" \
+            --set "gateway.enabled=true"
+    fi
 fi
-# --- END FIXED ENVOY NAMESPACE CONFIGURATION ---
+# --- END VERSION-AWARE ENVOY CONFIGURATION ---
 
 NAI_OPS_DIR=$(find "${BUNDLE_DIR}/unpacked" -maxdepth 1 -name "nai-operators-*" | head -n 1 || true)
 deploy_chart "nai-operators" "$NAI_OPS_DIR"
