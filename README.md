@@ -1,6 +1,6 @@
 # Nutanix Enterprise AI (NAI) Installer
 
-A production-hardened deployment script for **Nutanix Enterprise AI**, supporting both air-gapped (dark site) and internet-connected environments. Features version-aware Envoy Gateway patching, split-brain CSI configuration, and optional NKP cluster provisioning.
+A production-hardened deployment script for **Nutanix Enterprise AI**, designed for air-gapped (dark site) environments. Both installation modes — Dark Site and Internet-Based — deploy NAI entirely from a local Harbor registry; no container images are ever pulled from the internet during the install. The Internet-Based mode is a hybrid that only uses an outbound connection to download prerequisite tooling (such as `helm` or `skopeo`) onto the bastion, not to source NKP or NAI images.
 
 > **This is an add-on to the [NKP Install Pipeline](https://github.com/scoleman43/nkp-install-pipeline).** It is designed to run on the same bastion host after the NKP pipeline has completed. The tools, Harbor registry, and Kubernetes cluster provisioned by that pipeline are direct prerequisites for this installer.
 
@@ -165,17 +165,23 @@ The installer will confirm before making any changes, then:
 
 ## Installation Modes
 
-### Air-Gapped (Dark Site)
+Both modes are fundamentally air-gapped installs — NAI components are always deployed from the local Harbor registry, never pulled from the internet. The difference between the two modes is only in how the bastion acquires prerequisite tooling before the install begins.
 
-- All images and charts are sourced from local bundle files on the bastion
-- `helm` and `skopeo` are already present if the NKP pipeline ran; if not, the installer can bootstrap them from the `nkp-prereqs-bundle.tar` from the NKP pipeline releases
-- No outbound internet access required after bundle files are staged
+### Dark Site (Fully Offline)
 
-### Internet-Based
+The true air-gapped path. No outbound internet access is required at any point.
 
-- Downloads and installs `helm` automatically if missing
+- All NAI images and Helm charts are sourced from local bundle files staged on the bastion
+- Prerequisite tools (`helm`, `skopeo`) are already present from the NKP pipeline, or can be bootstrapped from the `nkp-prereqs-bundle.tar` available on the NKP pipeline's GitHub Releases page
+- All NAI component deployments pull exclusively from the local Harbor registry
+
+### Internet-Based (Hybrid)
+
+A hybrid mode for bastions that have a temporary or limited outbound connection. The NKP and NAI installs themselves remain fully air-gapped — internet access is only used to fetch missing prerequisite binaries onto the bastion.
+
+- Downloads and installs `helm` automatically if missing from the bastion
 - Attempts to install `skopeo` via the system package manager (`apt` / `yum`)
-- Pulls the NAI bundle from `bundlenai-v<VERSION>.tar` in the current directory
+- All NAI images and Helm charts are still sourced from local bundle files — no NAI or NKP container images are pulled from the internet during deployment
 
 ### Cluster Provisioning
 
