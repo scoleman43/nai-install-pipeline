@@ -1,6 +1,6 @@
 # Nutanix Enterprise AI (NAI) Installer
 
-A production-hardened deployment script for **Nutanix Enterprise AI**, designed for air-gapped (dark site) environments. Both installation modes — Dark Site and Internet-Based — deploy NAI entirely from a local Harbor registry; no container images are ever pulled from the internet during the install. The Internet-Based mode is a hybrid that only uses an outbound connection to download prerequisite tooling (such as `helm` or `skopeo`) onto the bastion, not to source NKP or NAI images.
+A deployment script for **Nutanix Enterprise AI**, designed for air-gapped (dark site) environments. Both installation modes — Dark Site and Internet-Based — deploy NAI entirely from a local Harbor registry; no container images are ever pulled from the internet during the install. The Internet-Based mode is a hybrid that only uses an outbound connection to download prerequisite tooling (such as `helm` or `skopeo`) onto the bastion, not to source NKP or NAI images.
 
 > **This is an add-on to the [NKP Install Pipeline](https://github.com/scoleman43/nkp-install-pipeline).** It is designed to run on the same bastion host after the NKP pipeline has completed. The tools, Harbor registry, and Kubernetes cluster provisioned by that pipeline are direct prerequisites for this installer.
 
