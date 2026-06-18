@@ -9,6 +9,7 @@ A production-hardened deployment script for **Nutanix Enterprise AI**, supportin
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
+  - [Nutanix Files — Pre-Configuration Required](#nutanix-files--pre-configuration-required)
 - [Quick Start](#quick-start)
 - [Installation Modes](#installation-modes)
 - [Configuration Reference](#configuration-reference)
@@ -52,11 +53,38 @@ Place the following NAI-specific bundle files in your working directory on the b
 **For Internet-Connected installs:**
 - `bundlenai-v<VERSION>.tar` — NAI bundle downloaded from Nutanix Portal
 
+### Nutanix Files — Pre-Configuration Required
+
+NAI uses Nutanix Files to provide RWX (ReadWriteMany) shared storage for model weights and inference data. This is separate from the block storage used by NKP and must be configured in Prism Central **before** running the NAI installer. The installer will fail at the CSI storage class step if Files is not ready.
+
+Complete the following on your Nutanix Files file server before proceeding:
+
+**1. Enable NFS**
+
+NFSv4 must be enabled on the file server. In Prism Central, navigate to **Files → your file server → Protocol Configuration** and ensure NFS is enabled. NAI's CSI driver provisions NFS-backed PersistentVolumes dynamically, so this must be active before any PVCs are created.
+
+**2. Verify DNS Resolution**
+
+The NAI installer accepts either an IP address or an FQDN for the file server endpoint (`FILE_SERVER_FQDN_OR_IP`). Using an IP address will work and avoids any DNS dependency, but using an FQDN is recommended — it decouples the configuration from a specific IP, makes the setup more resilient to network changes, and is consistent with how Nutanix Files is typically referenced in production environments.
+
+If using an FQDN, confirm that it resolves correctly from within the Kubernetes cluster nodes and that the DNS server used by your cluster can reach it.
+
+> ⚠️ **Ubuntu DNS and `.local` domains:** Ubuntu uses `systemd-resolved`, which does not forward `.local` queries to the upstream DNS server — it treats them as mDNS/Bonjour and only resolves them on the local host. If your file server or any other infrastructure component uses a `.local` domain (e.g., `files-server.nutanix.local`), name resolution **will silently fail** on Ubuntu-based cluster nodes. Use `.internal` or a proper registered domain (e.g., `.corp`, `.com`) for all infrastructure DNS entries instead.
+
+**3. Create a Files REST API User Account**
+
+The NAI CSI driver authenticates to the Files REST API to manage NFS exports. Create a dedicated API user on the file server before running the installer:
+
+- In Prism Central, navigate to **Files → your file server → Manage Roles**
+- Create a user with **File Server Admin** or equivalent REST API access
+- Note the username and password — the installer will prompt for these as `FILES_REST_USER` and `FILES_REST_PASSWORD`
+
+The installer stores this credential in the `ntnx-secret` Kubernetes secret under the `files-key` field, alongside the Prism Central block storage credential.
+
 ### Additional Infrastructure Requirements
 
-Beyond what the NKP pipeline already provides, NAI requires:
+Beyond the NKP pipeline and Nutanix Files configuration, NAI also requires:
 
-- A **Nutanix Files** server for RWX (ReadWriteMany) shared model storage — this is separate from the block storage used by NKP
 - If provisioning a **new dedicated NAI cluster** (rather than deploying onto the existing NKP cluster): additional VIPs for a second control plane and MetalLB range
 
 ---
