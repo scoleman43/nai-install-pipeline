@@ -300,7 +300,7 @@ For NAI **≤ 2.7.x**, the installer applies a compatibility patch that:
 - Configures Redis rate limiting pointed at the NAI-managed Redis instance
 - Bounces Envoy control plane pods to pick up the new configuration
 
-For NAI **2.8+**, standard Helm deployment is used and the patch is skipped automatically.
+For NAI **2.8+**, standard Helm deployment is used and the patch is skipped automatically.(assuming this gets fixed in the next upcoming release)
 
 ### Ghost CRD Cleanup
 
