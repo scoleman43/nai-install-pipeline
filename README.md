@@ -103,6 +103,8 @@ Beyond the NKP pipeline and Nutanix Files configuration, NAI also requires:
 
 These steps assume you are on the same bastion host where the NKP Install Pipeline completed.
 
+> 💡 **Recommended Tool — MobaXterm (Windows):** If you are connecting to the bastion from a Windows machine, [MobaXterm Home Edition](https://mobaxterm.mobatek.net/download-home-edition.html) is a free, all-in-one SSH client with a built-in SCP file browser. It lets you open an SSH terminal and drag-and-drop the NAI bundle files onto the bastion in the same window, without needing a separate SCP or SFTP tool.
+
 ### 1. Copy the NAI Scripts to the Bastion
 
 ```bash
