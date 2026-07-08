@@ -9,18 +9,19 @@ A deployment script for **Nutanix Enterprise AI**, designed for air-gapped (dark
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-  - [Nutanix Files — Pre-Configuration Required](#nutanix-files--pre-configuration-required)
+  * [Nutanix Files — Pre-Configuration Required](#nutanix-files--pre-configuration-required)
 - [Quick Start](#quick-start)
 - [Installation Modes](#installation-modes)
 - [Configuration Reference](#configuration-reference)
 - [Uninstall & Reinstall](#uninstall--reinstall)
-- [Architecture Notes](#architecture-notes)
+- [Architecture Overview](#architecture-overview)
+- [Implementation Details](#implementation-details)
 - [Monitoring & Troubleshooting](#monitoring--troubleshooting)
-  - [AI Model Health](#1-ai-model-health-kserve)
-  - [Pod & Gateway Diagnostics](#2-pod--gateway-diagnostics)
-  - [Resource Utilization](#3-resource-utilization)
-  - [Cluster-Wide Events](#4-cluster-wide-events)
-  - [Common Install Issues](#5-common-install-issues)
+  * [AI Model Health](#1-ai-model-health-kserve)
+  * [Pod & Gateway Diagnostics](#2-pod--gateway-diagnostics)
+  * [Resource Utilization](#3-resource-utilization)
+  * [Cluster-Wide Events](#4-cluster-wide-events)
+  * [Common Install Issues](#5-common-install-issues)
 
 ---
 
@@ -30,32 +31,34 @@ A deployment script for **Nutanix Enterprise AI**, designed for air-gapped (dark
 
 This installer assumes the [NKP Install Pipeline](https://github.com/scoleman43/nkp-install-pipeline) has already been run to completion on the bastion host. The following are provided by that pipeline and do not need to be installed separately:
 
-| Provided By NKP Pipeline | What It Supplies |
-|--------------------------|-----------------|
-| `phase1.sh` | Docker runtime, `gum`, `kubectl`, `helm`, `skopeo`, and a running Harbor registry with a valid SSL certificate |
-| `phase2.sh` | AHV node OS image staged in Prism Central |
-| `phase3.sh` | A running NKP Kubernetes cluster with a valid kubeconfig (`./<cluster-name>.conf`) and the Harbor `/nkp` project pre-populated |
+| Provided By NKP Pipeline | What It Supplies                                                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `phase1.sh`              | Docker runtime, `gum`, `kubectl`, `helm`, `skopeo`, and a running Harbor registry with a valid SSL certificate                 |
+| `phase2.sh`              | AHV node OS image staged in Prism Central                                                                                      |
+| `phase3.sh`              | A running NKP Kubernetes cluster with a valid kubeconfig (`./<cluster-name>.conf`) and the Harbor `/nkp` project pre-populated |
 
 If you are deploying NAI onto an **existing NKP cluster** that was not provisioned by the pipeline, ensure the following tools are available on your bastion before proceeding:
 
-| Tool | Purpose |
-|------|---------|
-| `kubectl` | Kubernetes cluster interaction |
-| `nkp` | Nutanix Kubernetes Platform CLI |
-| `helm` | Chart deployment (auto-installed if missing in internet mode) |
-| `docker` | Container image operations |
-| `gum` | Interactive terminal UI — [install here](https://github.com/charmbracelet/gum) |
-| `skopeo` | *(Recommended)* Faster image mirroring; falls back to `docker` if unavailable |
+| Tool      | Purpose                                                                        |
+| --------- | ------------------------------------------------------------------------------ |
+| `kubectl` | Kubernetes cluster interaction                                                 |
+| `nkp`     | Nutanix Kubernetes Platform CLI                                                |
+| `helm`    | Chart deployment (auto-installed if missing in internet mode)                  |
+| `docker`  | Container image operations                                                     |
+| `gum`     | Interactive terminal UI — [install here](https://github.com/charmbracelet/gum) |
+| `skopeo`  | *(Recommended)* Faster image mirroring; falls back to `docker` if unavailable  |
 
 ### Required Assets
 
 Place the following NAI-specific bundle files in your working directory on the bastion:
 
 **For Air-Gapped installs:**
+
 - `*helm*.tar` or `*chart*.tar` — NAI Helm Charts bundle (from Nutanix Support Portal)
 - `nai-v*.tar` or `*nai*image*.tar*` — NAI container image bundle
 
 **For Internet-Connected installs:**
+
 - `bundlenai-v<VERSION>.tar` — NAI bundle downloaded from Nutanix Portal
 
 ### Nutanix Files — Pre-Configuration Required
@@ -107,14 +110,14 @@ These steps assume you are on the same bastion host where the NKP Install Pipeli
 
 ### 1. Copy the NAI Scripts to the Bastion
 
-```bash
+```
 # From the bastion host, in the same working directory as the NKP pipeline scripts
 chmod +x nai-install.sh nai-teardown.sh
 ```
 
 ### 2. Stage Your NAI Bundle Files
 
-```bash
+```
 # Your working directory should look something like this
 ls -1
 # phase1.sh
@@ -129,7 +132,7 @@ ls -1
 
 ### 3. Run the Installer
 
-```bash
+```
 ./nai-install.sh
 ```
 
@@ -138,6 +141,7 @@ The installer is fully interactive and will prompt for all required values.
 ### 4. Follow the Interactive Prompts
 
 **Stage 1 — Network Mode**
+
 ```
 ? Please select the installation network mode:
   > Dark Site / Air-Gapped (Local bundle)
@@ -157,6 +161,7 @@ The installer is fully interactive and will prompt for all required values.
 **Stage 3 — Credentials & Endpoints**
 
 You will be prompted for:
+
 - Prism Central IP/FQDN and credentials
 - Nutanix Files server short name, IP/FQDN, and REST API credentials
 - Private registry URL, username, and password — use the same Harbor instance deployed by `phase1.sh`
@@ -165,6 +170,7 @@ You will be prompted for:
 **Stage 4 — Deployment**
 
 The installer will confirm before making any changes, then:
+
 1. Seed NAI images into your Harbor registry under the `/nkp` project
 2. Provision a new NKP cluster (if selected)
 3. Deploy all NAI components via Helm
@@ -193,11 +199,11 @@ A hybrid mode for bastions that have a temporary or limited outbound connection.
 
 ### Cluster Provisioning
 
-| Option | Recommended | Description |
-|--------|-------------|-------------|
-| **Provision NEW — Self-Managed** | ✅ Yes | Creates a dedicated standalone NKP cluster for NAI; kubeconfig saved to `./<cluster-name>.conf` |
-| **Provision NEW — Managed** | ✅ Yes | Creates a dedicated NAI cluster registered to an existing NKP Management Cluster |
-| **Use Existing Cluster** | ⚠️ Only if dedicated | Deploys NAI onto an existing cluster — only appropriate if that cluster is already dedicated to NAI, not shared with the NKP management plane |
+| Option                           | Recommended          | Description                                                                                                                                   |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Provision NEW — Self-Managed** | ✅ Yes                | Creates a dedicated standalone NKP cluster for NAI; kubeconfig saved to `./<cluster-name>.conf`                                               |
+| **Provision NEW — Managed**      | ✅ Yes                | Creates a dedicated NAI cluster registered to an existing NKP Management Cluster                                                              |
+| **Use Existing Cluster**         | ⚠️ Only if dedicated | Deploys NAI onto an existing cluster — only appropriate if that cluster is already dedicated to NAI, not shared with the NKP management plane |
 
 > ⚠️ **Do not install NAI on the same cluster as the NKP management plane.** NAI's inference operators, GPU workloads, and Envoy gateway components are resource-intensive and will compete with management plane services, risking instability for the entire NKP environment.
 
@@ -209,22 +215,22 @@ All inputs are cached to `.nai_cache.env` on the local bastion after the first r
 
 > **Note:** `.nai_cache.env` contains plaintext credentials. Restrict its permissions with `chmod 600 .nai_cache.env` and delete it when no longer needed, or use the cache purge option in `nai-teardown.sh`.
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `PC_ENDPOINT` | Prism Central IP or FQDN | `10.0.0.10` |
-| `NUTANIX_USER` | Prism Central username | `admin` |
-| `FILE_SERVER_SHORT_NAME` | Logical name of Files server in Prism | `NAI-FS2` |
-| `FILE_SERVER_FQDN_OR_IP` | Network endpoint for CSI pod | `10.0.0.20` |
-| `FILES_REST_USER` | Files REST API username | `files-fs2` |
-| `REGISTRY_URL` | Harbor registry from phase1.sh (no protocol prefix) | `harbor.local:5000` |
-| `REGISTRY_USER` | Registry username | `admin` |
-| `TARGET_NAMESPACE` | Kubernetes namespace for NAI | `nai-system` |
-| `PE_CLUSTER` | Prism Element cluster name *(new clusters only)* | `PE-PROD` |
-| `SUBNET` | AHV subnet name or UUID *(new clusters only)* | `VLAN-100` |
-| `STORAGE_CONTAINER` | CSI storage container *(new clusters only)* | `default` |
-| `IMAGE_NAME` | AHV VM image for K8s nodes *(new clusters only)* | `nkp-ubuntu-22.04` |
-| `NAI_CP_VIP` | Control plane virtual IP *(new clusters only)* | `10.0.0.50` |
-| `NAI_METALLB_RANGE` | MetalLB IP range *(new clusters only)* | `10.0.0.51-10.0.0.60` |
+| Variable                 | Description                                         | Example               |
+| ------------------------- | ----------------------------------------------------- | ------------------------ |
+| `PC_ENDPOINT`            | Prism Central IP or FQDN                            | `10.0.0.10`           |
+| `NUTANIX_USER`           | Prism Central username                              | `admin`               |
+| `FILE_SERVER_SHORT_NAME` | Logical name of Files server in Prism               | `NAI-FS2`             |
+| `FILE_SERVER_FQDN_OR_IP` | Network endpoint for CSI pod                        | `10.0.0.20`           |
+| `FILES_REST_USER`        | Files REST API username                             | `files-fs2`           |
+| `REGISTRY_URL`           | Harbor registry from phase1.sh (no protocol prefix) | `harbor.local:5000`   |
+| `REGISTRY_USER`          | Registry username                                   | `admin`               |
+| `TARGET_NAMESPACE`       | Kubernetes namespace for NAI                        | `nai-system`          |
+| `PE_CLUSTER`             | Prism Element cluster name *(new clusters only)*    | `PE-PROD`             |
+| `SUBNET`                 | AHV subnet name or UUID *(new clusters only)*       | `VLAN-100`            |
+| `STORAGE_CONTAINER`      | CSI storage container *(new clusters only)*         | `default`             |
+| `IMAGE_NAME`             | AHV VM image for K8s nodes *(new clusters only)*    | `nkp-ubuntu-22.04`    |
+| `NAI_CP_VIP`             | Control plane virtual IP *(new clusters only)*      | `10.0.0.50`           |
+| `NAI_METALLB_RANGE`      | MetalLB IP range *(new clusters only)*              | `10.0.0.51-10.0.0.60` |
 
 ---
 
@@ -236,13 +242,13 @@ The `nai-teardown.sh` script performs a complete, forced removal of NAI and all 
 
 ### Running the Teardown
 
-```bash
+```
 ./nai-teardown.sh
 ```
 
 If NAI was deployed into a non-default namespace, set the variable before running:
 
-```bash
+```
 TARGET_NAMESPACE=my-nai-namespace ./nai-teardown.sh
 ```
 
@@ -253,12 +259,14 @@ The teardown runs in four stages:
 **Stage 1 — Graceful Helm Removal**
 
 Attempts clean `helm uninstall` for all releases in order:
+
 - `gateway-helm` from `envoy-gateway-system`
 - `nai-core`, `nai-operators`, `kserve`, `opentelemetry-operator`, `gateway-crds`, `kserve-crd` from `nai-system`
 
 **Stage 2 — Forced Namespace Deletion**
 
 Handles the common case where Kubernetes namespaces get stuck in `Terminating` due to lingering finalizers. For each of `nai-system`, `nai-admin`, and `envoy-gateway-system` it:
+
 1. Issues a non-blocking `kubectl delete namespace`
 2. Strips finalizers from all standard resources (`pods`, `pvc`, `secrets`, etc.)
 3. Strips finalizers from all Custom Resources (Envoy, KServe, and others)
@@ -267,6 +275,7 @@ Handles the common case where Kubernetes namespaces get stuck in `Terminating` d
 **Stage 3 — Cluster-Scoped Cleanup**
 
 Removes resources that live outside any namespace and would otherwise block a clean reinstall:
+
 - `GatewayClass` objects (`traefik`, `envoy-gateway-gatewayclass`)
 - `StorageClass` (`nai-nfs-storage`)
 - Envoy `ClusterRole` and `ClusterRoleBinding` (prevents collision on reinstall)
@@ -280,7 +289,7 @@ Optionally deletes `.nai_cache.env`. Recommended if credentials have changed or 
 
 Once the teardown completes, you can run the installer immediately:
 
-```bash
+```
 ./nai-install.sh
 ```
 
@@ -288,7 +297,68 @@ Cached values from `.nai_cache.env` (if kept) will pre-fill all prompts, making 
 
 ---
 
-## Architecture Notes
+## Architecture Overview
+
+`nai-install.sh` deploys NAI as a layered stack on top of the NKP Kubernetes cluster. Everything is delivered as Helm charts (or CRD bundles applied directly where a chart would exceed Helm's 1MB limit) sourced from the local bundles staged in [Quick Start](#quick-start) — see [Installation Modes](#installation-modes) for how those bundles get onto the bastion in the first place.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  NAI APPLICATION            nai-operators, nai-core          │
+├─────────────────────────────────────────────────────────────┤
+│  MODEL SERVING               KServe                          │
+├─────────────────────────────────────────────────────────────┤
+│  NETWORKING                  Gateway API CRDs, Envoy Gateway,│
+│                                cert-manager, MetalLB range    │
+├─────────────────────────────────────────────────────────────┤
+│  OBSERVABILITY                OpenTelemetry Operator,        │
+│                                Prometheus CRDs (Starter tier) │
+├─────────────────────────────────────────────────────────────┤
+│  STORAGE                      Nutanix CSI + StorageClasses   │
+│                                (see Architecture Notes below) │
+├─────────────────────────────────────────────────────────────┤
+│  IMAGES & PACKAGING           Harbor registry, Skopeo/Docker,│
+│                                Helm                            │
+├─────────────────────────────────────────────────────────────┤
+│  FOUNDATION                   NKP cluster (Kubernetes)       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| Component | Role | Installed by |
+|---|---|---|
+| **NKP cluster** | Kubernetes foundation all workloads run on | `nkp create cluster nutanix ...` (new cluster) or existing kubeconfig import |
+| **Helm** | Package manager driving nearly every chart below | Prereq check on startup; invoked throughout via the script's `deploy_chart()` helper |
+| **Harbor registry + Skopeo/Docker** | Local image warehouse; Skopeo (preferred) or Docker (fallback) seed it from the air-gapped image bundle | Image Registry Seeding step |
+| **Nutanix CSI + StorageClasses** | Persistent block and RWX storage — see [Storage (Split-Brain CSI)](#storage-split-brain-csi) for the full breakdown | Secret + StorageClass manifest; referenced in `nai-core` Helm values |
+| **cert-manager** | Issues/manages HTTPS certificates for the gateway | Conditional CRD seeding on Starter-tier license clusters |
+| **Gateway API CRDs + Envoy Gateway** | Routing rulebook + traffic controller for all NAI endpoints — see [Version-Aware Envoy Gateway Patching](#version-aware-envoy-gateway-patching) | CRDs applied directly; controller deployed via version-aware branch |
+| **MetalLB IP range** | Assigns a real, externally-reachable IP to the gateway | Collected during Stage 3 prompts, passed to `nkp create cluster` |
+| **OpenTelemetry Operator** | Collects logs/metrics/traces across NAI components | `deploy_chart "opentelemetry-operator"` |
+| **Prometheus CRDs** (`PodMonitor`/`ServiceMonitor`/`PrometheusRule`) | Metrics alerting objects; only relevant on Starter tier, which lacks the full monitoring stack | Conditional cleanup/CRD seeding based on `NKP_LICENSE_TIER` |
+| **KServe** | Runs and exposes ML models as standardized endpoints, in `RawDeployment` mode | CRDs applied directly, then controller via `deploy_chart "kserve"` |
+| **nai-operators** | Automation controllers for NAI's internal lifecycle | `deploy_chart "nai-operators"` |
+| **nai-core** | The NAI application itself | `deploy_chart "nai-core"`, wired to the domain, storage classes, and gateway cert config above |
+
+**Install-order dependency chain:**
+
+```
+NKP cluster
+   └─ Helm + Harbor registry seeded
+        └─ CSI / StorageClasses
+             └─ cert-manager (if Starter tier)
+                  └─ Gateway API CRDs → Envoy Gateway
+                       └─ OpenTelemetry Operator
+                            └─ KServe (CRDs → controller)
+                                 └─ nai-operators
+                                      └─ nai-core
+```
+
+Networking and observability must be in place before `nai-core` deploys, since its Helm values directly reference the gateway's self-signed cert config and the storage classes provisioned earlier.
+
+> 📘 Looking for a from-scratch explanation of what each of these tools *is* and why Kubernetes platforms use them — written for readers with no prior Kubernetes background? See [`nai-platform-explained.md`](nai-platform-explained.md).
+
+---
+
+## Implementation Details
 
 ### Storage (Split-Brain CSI)
 
@@ -302,6 +372,7 @@ The Files CSI secret (`ntnx-secret`) stores both the Prism Central block storage
 ### Version-Aware Envoy Gateway Patching
 
 For NAI **≤ 2.7.x**, the installer applies a compatibility patch that:
+
 - Deploys the Envoy Gateway into a dedicated `envoy-gateway-system` namespace
 - Injects an `EnvoyGateway` ConfigMap with AI extension manager hooks wired to `ai-gateway-controller`
 - Configures Redis rate limiting pointed at the NAI-managed Redis instance
@@ -322,15 +393,19 @@ Before deployment, the installer removes finalizers from any stuck `envoyproxy.i
 NAI uses KServe to run AI models. These commands let you inspect the state of deployed models and their backing pods.
 
 **List all active inference models and their readiness state:**
-```bash
+
+```
 kubectl get inferenceservices -n nai-system
 ```
+
 This shows every deployed model, its ready status, and the internal URL it is listening on.
 
 **Find the specific pod running a model:**
-```bash
+
+```
 kubectl get pods -n nai-system -l serving.kserve.io/inferenceservice=<model-name>
 ```
+
 If a model shows as Active in the NAI UI but requests are failing, check this pod directly — a vLLM engine crash due to insufficient GPU memory will appear here.
 
 ---
@@ -338,44 +413,57 @@ If a model shows as Active in the NAI UI but requests are failing, check this po
 ### 2. Pod & Gateway Diagnostics
 
 **Check the state of all Envoy Gateway components:**
-```bash
+
+```
 kubectl get pods -n envoy-gateway-system
 ```
+
 Look for `3/3 Ready` on the ingress pod — the third container is the NAI AI sidecar (the JSON parser). If it shows `2/3`, the sidecar has not injected successfully.
 
 **Search for Envoy proxy pods across all namespaces:**
-```bash
+
+```
 kubectl get pods -A | grep envoy-nai-system-nai-ingress
 ```
+
 Useful for tracking down where Envoy proxies are actually running after a gateway restart or reconfiguration.
 
 **Inspect the gateway's load balancer IP and node ports:**
-```bash
+
+```
 kubectl get svc -n envoy-gateway-system
 ```
+
 Use this to find the External IP assigned by MetalLB and verify the service endpoints for building test requests.
 
 **Describe a pod to diagnose startup failures:**
-```bash
+
+```
 kubectl describe pod <pod-name> -n <namespace>
 ```
+
 Scroll to the **Events** section at the bottom. This is the first place to look for any pod stuck in `Pending` or `CrashLoopBackOff` — it will show the exact reason (e.g., insufficient memory, failed image pull, volume not found).
 
 **View pod logs:**
-```bash
+
+```
 kubectl logs <pod-name> -n <namespace>
 ```
 
 **View logs from a specific container in the Envoy ingress pod:**
-```bash
+
+```
 kubectl logs <ingress-pod-name> -n envoy-gateway-system -c nai-extproc
 ```
+
 The ingress pod runs three containers, so the `-c` flag is required. The `nai-extproc` container is the AI gateway JSON parser — if requests are returning 500 errors, its logs will show exactly how it is failing to read or route the model name.
 
 **Force-restart the Envoy control plane to pick up config changes:**
-```bash
+
+```
 kubectl delete pod -n envoy-gateway-system -l control-plane=envoy-gateway
 ```
+
 Deleting the control plane pod forces an immediate reboot. The controller will re-read the `EnvoyGateway` ConfigMap and spawn fresh proxy pods. Use this after manually patching gateway configuration.
 
 ---
@@ -385,12 +473,14 @@ Deleting the control plane pod forces an immediate reboot. The controller will r
 AI models are resource-intensive. Use these commands to verify your cluster nodes are not saturated.
 
 **Node-level CPU and memory consumption:**
-```bash
+
+```
 kubectl top nodes
 ```
 
 **Per-pod CPU and memory consumption in the NAI namespace:**
-```bash
+
+```
 kubectl top pods -n nai-system
 ```
 
@@ -399,49 +489,50 @@ kubectl top pods -n nai-system
 ### 4. Cluster-Wide Events
 
 **Chronological event timeline for the NAI namespace:**
-```bash
+
+```
 kubectl get events -n nai-system --sort-by='.metadata.creationTimestamp'
 ```
+
 If components are crashing and restarting in a loop, this gives you the exact sequence of events leading up to the failure — more useful than pod logs alone when the cause is not obvious.
 
 ---
 
 ### 5. Common Install Issues
 
-**Namespace stuck in `Terminating`**
-Run `nai-teardown.sh` to strip finalizers and force-close the namespace before reinstalling. The installer will exit early with an explicit error if this condition is detected on startup.
+**Namespace stuck in `Terminating`** Run `nai-teardown.sh` to strip finalizers and force-close the namespace before reinstalling. The installer will exit early with an explicit error if this condition is detected on startup.
 
-**Ghost ClusterRole blocking reinstall**
-If Helm fails during gateway deployment with a permissions conflict, manually remove the leftover cluster-scoped role from a previous install:
-```bash
+**Ghost ClusterRole blocking reinstall** If Helm fails during gateway deployment with a permissions conflict, manually remove the leftover cluster-scoped role from a previous install:
+
+```
 kubectl delete clusterrole gateway-helm-envoy-gateway-role --ignore-not-found
 kubectl delete clusterrolebinding gateway-helm-envoy-gateway-rolebinding --ignore-not-found
 ```
+
 The teardown script handles this automatically, but it can be run manually if needed.
 
-**CRD stuck with finalizers**
-If a KServe or Envoy CRD is stuck and blocking deletion:
-```bash
+**CRD stuck with finalizers** If a KServe or Envoy CRD is stuck and blocking deletion:
+
+```
 kubectl patch crd <crd-name> --type=json -p='[{"op": "remove", "path": "/metadata/finalizers"}]'
 ```
 
-**Force-finalize a stuck namespace**
-When a namespace is stuck in `Terminating` and standard deletion is not working:
-```bash
+**Force-finalize a stuck namespace** When a namespace is stuck in `Terminating` and standard deletion is not working:
+
+```
 kubectl get namespace <namespace> -o json   | tr -d "
 "   | sed 's/"finalizers": \[[^]]\+\]/"finalizers": []/'   | kubectl replace --raw /api/v1/namespaces/<namespace>/finalize -f -
 ```
+
 This bypasses standard API protections and forces Kubernetes to immediately drop the namespace. The teardown script runs this automatically for `nai-system`, `nai-admin`, and `envoy-gateway-system`.
 
-**Helm deploy fails with a 1MB limit error**
-CRD-heavy charts (`gateway-crds`, `kserve-crd`) are applied directly via `kubectl apply --server-side` to bypass this limit. If you see this error for another chart, check the chart size and consider splitting CRDs manually.
+**Helm deploy fails with a 1MB limit error** CRD-heavy charts (`gateway-crds`, `kserve-crd`) are applied directly via `kubectl apply --server-side` to bypass this limit. If you see this error for another chart, check the chart size and consider splitting CRDs manually.
 
-**Images not found in registry**
-The installer checks `/v2/nkp/nutanix/nai-api/tags/list` to detect existing images. If the check returns a non-200 status, it will attempt to push from the local bundle. Ensure your Harbor instance is running and that the `/nkp` project exists — both are set up by `phase1.sh` in the NKP pipeline.
+**Images not found in registry** The installer checks `/v2/nkp/nutanix/nai-api/tags/list` to detect existing images. If the check returns a non-200 status, it will attempt to push from the local bundle. Ensure your Harbor instance is running and that the `/nkp` project exists — both are set up by `phase1.sh` in the NKP pipeline.
 
-**`gum` not found**
-If you did not run the NKP pipeline, install `gum` manually:
-```bash
+**`gum` not found** If you did not run the NKP pipeline, install `gum` manually:
+
+```
 # Linux (Debian/Ubuntu)
 sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
@@ -449,5 +540,4 @@ echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *
 sudo apt update && sudo apt install gum
 ```
 
-**`skopeo` unavailable in air-gapped mode**
-If `skopeo` cannot be found, the installer falls back to `docker load` + `docker push`. Ensure the Docker daemon is running and that your user is in the `docker` group (the NKP `phase1.sh` handles this — if you skipped it, run `sudo usermod -aG docker $USER` and re-login).
+**`skopeo` unavailable in air-gapped mode** If `skopeo` cannot be found, the installer falls back to `docker load` + `docker push`. Ensure the Docker daemon is running and that your user is in the `docker` group (the NKP `phase1.sh` handles this — if you skipped it, run `sudo usermod -aG docker $USER` and re-login).
