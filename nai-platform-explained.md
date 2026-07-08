@@ -14,7 +14,7 @@ Each "tenant" running inside Kubernetes is called a **pod** (a small, wrapped bu
 
 Everything below is either: (a) a *tenant* running inside this building, (b) a *service* the building provides to its tenants (like plumbing or electricity), or (c) a *tool you use from outside* to manage the building.
 
-**NKP** (Nutanix Kubernetes Platform) is Nutanix's packaged, ready-to-run version of this apartment building — it's the actual Kubernetes distribution your script provisions in Step 4, via the `nkp create cluster` command (lines 490–522). Think of NKP as "Kubernetes, pre-assembled and warrantied by Nutanix," as opposed to building the apartment complex brick by brick yourself.
+**NKP** (Nutanix Kubernetes Platform) is Nutanix's packaged, ready-to-run version of this apartment building — it's the actual Kubernetes distribution the script provisions in Step 4, via the `nkp create cluster` command (lines 490–522). Think of NKP as "Kubernetes, pre-assembled and warrantied by Nutanix," as opposed to building the apartment complex brick by brick yourself.
 
 ---
 
